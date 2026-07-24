@@ -12,7 +12,7 @@ from .utils import build_model_config
 from ..modeling.model import ChessModel
 from ..modeling.heads import PolicyOutput, ValueOutput
 from ..modeling.ssl import SSLChessModel, Predictor
-from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, ssl_collate_fn
+from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollateFn
 from ..tracking import AccumulationBuffer, legal_f1
 
 from ..config import (
@@ -194,7 +194,7 @@ class SSLTrainer(Trainer):
             shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
-            collate_fn=ssl_collate_fn,
+            collate_fn=SSLCollateFn(self.data_config.max_prediction_depth),
         )
 
     def run(self):

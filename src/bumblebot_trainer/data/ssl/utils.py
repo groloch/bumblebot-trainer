@@ -2,18 +2,26 @@ import torch
 from ...utils import ChessConstants
 
 
-def ssl_collate_fn(batch):
-    tokens, tokens_, legal_moves, moves_list, lengths = zip(*batch)
+class SSLCollateFn:
+    def __init__(self, max_lookahead: int):
+        self.max_lookahead = max_lookahead
 
-    tokens = torch.stack(tokens)
-    tokens_ = torch.stack(tokens_)
+    def __call__(self, batch):
+        tokens, tokens_, legal_moves, moves_list, lengths = zip(*batch)
 
-    legal_moves = torch.stack(legal_moves)
+        tokens = torch.stack(tokens)
+        tokens_ = torch.stack(tokens_)
 
-    moves = torch.nn.utils.rnn.pad_sequence(
-        moves_list, batch_first=True, padding_value=ChessConstants.NUM_POLICY_CLASSES
-    )
-    lengths = torch.tensor(lengths, dtype=torch.long)
-    moves_attention_mask = (torch.arange(moves.shape[1]).unsqueeze(0) < lengths.unsqueeze(1)).long()
+        legal_moves = torch.stack(legal_moves)
 
-    return tokens, tokens_, legal_moves, moves, moves_attention_mask
+        batch_size = len(batch)
+        max_len = 1 + self.max_lookahead
+
+        moves = torch.full((batch_size, max_len), ChessConstants.NUM_POLICY_CLASSES, dtype=torch.long)
+        for i, move_seq in enumerate(moves_list):
+            moves[i, :len(move_seq)] = move_seq
+
+        lengths = torch.tensor(lengths, dtype=torch.long)
+        moves_attention_mask = (torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)).long()
+
+        return tokens, tokens_, legal_moves, moves, moves_attention_mask
