@@ -180,6 +180,7 @@ class SSLTrainer(Trainer):
         dataset = LichessStandardGamesSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
+            encoding=self.data_config.encoding,
         )
 
         print(f'{dataset.__class__.__name__} size: {len(dataset):,}')

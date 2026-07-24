@@ -23,11 +23,14 @@ class Embedding(nn.Module):
         self.positional_encoding = nn.Parameter(
             torch.zeros(ChessConstants.CONTEXT_LENGTH, hidden_size), requires_grad=True
         )
+        self.out_norm = nn.LayerNorm(hidden_size)
 
     def forward(self, tokens):
         x = self.embedding(tokens) + self.positional_encoding
+        x = nn.functional.silu(x)
         x = self.embed_norm(x)
 
         x = self.ffn(x) + x
+        x = self.out_norm(x)
 
         return x

@@ -1,4 +1,6 @@
-from .encoder import Encoder, EncoderOutput, BertEncoder, CNNEncoder, CFEncoder
+from .encoder import Encoder, EncoderOutput, BertEncoder, CNNEncoder
+
+from .cf import CFEncoder
 
 
 _encoder_mapping = {

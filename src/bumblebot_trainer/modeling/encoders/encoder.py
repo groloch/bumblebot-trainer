@@ -63,7 +63,3 @@ class BertEncoder(Encoder):
 
 class CNNEncoder(Encoder):
     pass
-
-
-class CFEncoder(Encoder):
-    pass

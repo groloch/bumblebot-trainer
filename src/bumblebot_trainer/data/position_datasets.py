@@ -22,7 +22,7 @@ class VariationNode:
 class PositionDataset(Dataset):
     """Abstract class for datasets of positions.
     """
-    def __init__(self):
+    def __init__(self, encoding: str):
         super().__init__()
 
         self.ignore_index = -100
@@ -31,7 +31,7 @@ class PositionDataset(Dataset):
 
         self.temperature = 0.1
 
-        self.encoding_style = 'simplified'
+        self.encoding = encoding
 
         self.taken_cls = 64
         self.promotion_cls_map = {
@@ -58,7 +58,7 @@ class PositionDataset(Dataset):
         Returns:
             tuple: A tuple containing the encoded board tokens and a target dictionary.
         """
-        tokens = encode_board(board, self.encoding_style)
+        tokens = encode_board(board, self.encoding)
 
         indices = torch.zeros((len(nodes),), dtype=torch.long)
         evals = torch.zeros((len(nodes),), dtype=torch.float)
@@ -122,8 +122,8 @@ class CombinedPositionDataset(Dataset):
 class SinglePositionDataset(PositionDataset):
     """For testing purposes, a dataset made of a single position
     """
-    def __init__(self, start_fen):
-        super().__init__()
+    def __init__(self, start_fen, encoding):
+        super().__init__(encoding)
 
         self.start_fen = start_fen
 

@@ -8,8 +8,8 @@ from ...utils import get_move_id, ChessConstants
 
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
-    def __init__(self, min_moves: int, max_prediction_depth: int):
-        super().__init__(min_moves)
+    def __init__(self, min_moves: int, max_prediction_depth: int, encoding: str):
+        super().__init__(min_moves, encoding)
 
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth, num_proc=16
@@ -23,9 +23,14 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         move_idx = np.random.randint(0, game_length)
         max_target_idx = min(move_idx + self.max_prediction_depth, game_length)
         target_idx = np.random.randint(
-            move_idx + 1,
+            move_idx,
             max_target_idx + 1,
         )
+        if target_idx % 2 != 0:
+            if target_idx == max_target_idx:
+                target_idx -= 1
+            else:
+                target_idx += 1
 
         game = self.dataset[idx]
         movelist = game['moves']
@@ -39,7 +44,7 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             legal_moves[get_move_id(move, board.turn)] = True
 
 
-        tokens = encode_board(board, self.encoding_style)
+        tokens = encode_board(board, self.encoding)
         movelist_ = torch.zeros(target_idx - move_idx, dtype=torch.long)
 
         for k in range(self.min_moves+move_idx, self.min_moves+target_idx):
@@ -47,6 +52,6 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             movelist_[k - (self.min_moves+move_idx)] = get_move_id(move, board.turn)
             board.push(move)
 
-        tokens_ = encode_board(board, self.encoding_style)
+        tokens_ = encode_board(board, self.encoding)
 
         return tokens, tokens_, legal_moves, movelist_, target_idx - move_idx

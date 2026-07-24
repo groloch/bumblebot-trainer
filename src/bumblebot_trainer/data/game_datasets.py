@@ -10,8 +10,8 @@ from .utils import san_to_uci
 
 class GamePositionDataset(PositionDataset):
     """Abstract class for datasets of positions extracted from games."""
-    def __init__(self, min_moves: int):
-        super().__init__()
+    def __init__(self, min_moves: int, encoding: str):
+        super().__init__(encoding)
 
         self.dataset = ...
         self.len = ...
@@ -31,13 +31,13 @@ class LichessStandardGamesDataset(GamePositionDataset):
 
     This dataset is licensed under the cc0-1.0 licence
     """
-    def __init__(self, min_moves):
-        super().__init__(min_moves)
+    def __init__(self, min_moves, encoding: str):
+        super().__init__(min_moves, encoding)
         data_files = [
             'data/year=2025/month=01/train-00000-of-00072.parquet',
-            'data/year=2025/month=01/train-00001-of-00072.parquet',
-            'data/year=2025/month=01/train-00002-of-00072.parquet',
-            'data/year=2025/month=01/train-00003-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00001-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00002-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00003-of-00072.parquet',
         ]
 
         self.dataset = load_dataset(
@@ -90,8 +90,8 @@ class LichessStandardGamesDataset(GamePositionDataset):
 class SingleGameDataset(PositionDataset):
     """For testing purposes, a dataset made of a single game
     """
-    def __init__(self, pgn):
-        super().__init__()
+    def __init__(self, pgn, encoding: str):
+        super().__init__(encoding)
 
         with open(pgn) as f:
             game = chess.pgn.read_game(f)
