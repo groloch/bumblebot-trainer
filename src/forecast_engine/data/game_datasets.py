@@ -9,6 +9,7 @@ from .utils import san_to_uci
 
 
 class GamePositionDataset(PositionDataset):
+    """Abstract class for datasets of positions extracted from games."""
     def __init__(self, min_moves: int):
         super().__init__()
 
@@ -24,6 +25,12 @@ class GamePositionDataset(PositionDataset):
 
 
 class LichessStandardGamesDataset(GamePositionDataset):
+    """LichessStandardGames is a billion-game-scale dataset that contains rated human games played
+    on lichess from 2013 to current date. Note: some of the games contain stockfish evaluations
+    (from various versions of stockfish and depth), which we filter out here.
+
+    This dataset is licensed under the cc0-1.0 licence
+    """
     def __init__(self, min_moves):
         super().__init__(min_moves)
         data_files = [
@@ -81,6 +88,8 @@ class LichessStandardGamesDataset(GamePositionDataset):
 
 
 class SingleGameDataset(PositionDataset):
+    """For testing purposes, a dataset made of a single game
+    """
     def __init__(self, pgn):
         super().__init__()
 

@@ -1,6 +1,7 @@
 import torch
 from ...utils import ChessConstants
 
+
 def ssl_collate_fn(batch):
     tokens, hm, ep_square, tokens_, hm_, ep_square_, legal_moves, moves_list, lengths = zip(*batch)
 

@@ -23,6 +23,8 @@ class VariationNode:
 
 
 class PositionDataset(Dataset):
+    """Abstract class for datasets of positions.
+    """
     def __init__(self):
         super().__init__()
 
@@ -47,6 +49,16 @@ class PositionDataset(Dataset):
             self,
             board: chess.Board,
             nodes: list[VariationNode]):
+        """Utility function for children classes that converts chess position
+        into batchable model inputs.
+
+        Args:
+            board (chess.Board): The current position
+            nodes (list[VariationNode]): The list of variations to consider (move/q value pairs)
+
+        Returns:
+            tuple: A tuple containing the encoded board tokens and a target dictionary.
+        """
         tokens, hm, ep_square = encode_board(board)
 
         indices = torch.zeros((len(nodes),), dtype=torch.long)
@@ -88,6 +100,8 @@ class PositionDataset(Dataset):
 
 
 class CombinedPositionDataset(Dataset):
+    """Utility class to aggregate several position datasets from different sources.
+    """
     def __init__(self, datasets: list[PositionDataset]):
         super().__init__()
 
@@ -109,6 +123,8 @@ class CombinedPositionDataset(Dataset):
 
 
 class SinglePositionDataset(PositionDataset):
+    """For testing purposes, a dataset made of a single position
+    """
     def __init__(self, start_fen):
         super().__init__()
 

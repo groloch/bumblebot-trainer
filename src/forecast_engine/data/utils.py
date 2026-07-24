@@ -4,7 +4,7 @@ import chess
 
 
 def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = False) -> list[str]:
-    """Convert a SAN movetext string (e.g. '1. e4 e5 2. Nf3 ...') to a list of UCI moves."""
+    """Convert a san movetext string to a list of uci moves."""
     movetext = re.sub(r'\{[^}]*\}', '', movetext)
     board = chess.Board(start_fen, chess960=chess960)
     uci_moves = []
