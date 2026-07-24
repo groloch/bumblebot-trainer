@@ -27,7 +27,7 @@ training:
 data:
   min_moves: 30
   max_prediction_depth: 10
-  encoding: 'simplified'
+  encoding: 'lc0'
 tracking:
   experiment_name: "ForecastEngine-SSL"
   tracking_uri: "file:./mlruns"
