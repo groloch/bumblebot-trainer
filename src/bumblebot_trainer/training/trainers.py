@@ -21,6 +21,7 @@ from ..config import (
     DataConfig,
     SSLTrainingConfig,
     EncoderConfig,
+    CFEncoderConfig,
     PredictorConfig,
     SSLDataConfig,
     SSLModelConfig
@@ -163,7 +164,7 @@ class SSLTrainer(Trainer):
         self.training_config = SSLTrainingConfig(**config['training'])
 
         hidden_size = config['model']['hidden_size']
-        encoder_config = EncoderConfig(hidden_size=hidden_size, **config['model'].pop('encoder'))
+        encoder_config = CFEncoderConfig(hidden_size=hidden_size, **config['model'].pop('encoder'))
 
         self.model_config = SSLModelConfig(encoder_config=encoder_config, **config['model'])
 

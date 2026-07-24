@@ -6,6 +6,9 @@ model:
     num_layers: 12
     intermediate_size: 1536
     num_heads: 32
+    compressed_dim: 32
+    smolgen_dim: 256
+    gen_dim: 256
 predictor:
   num_layers: 4
   intermediate_size: 1024

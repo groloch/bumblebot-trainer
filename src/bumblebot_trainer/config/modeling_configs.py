@@ -8,6 +8,11 @@ class EncoderConfig:
     intermediate_size: int
     num_heads: int
 
+@dataclass
+class CFEncoderConfig(EncoderConfig):
+    compressed_dim: int
+    smolgen_dim: int
+    gen_dim: int
 
 @dataclass
 class PredictorConfig(EncoderConfig):
