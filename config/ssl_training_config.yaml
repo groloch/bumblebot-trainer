@@ -1,0 +1,33 @@
+type: "ssl"
+model:
+  hidden_size: 1024
+  encoder:
+    num_layers: 12
+    intermediate_size: 1536
+    num_heads: 32
+predictor:
+  num_layers: 4
+  intermediate_size: 1024
+  num_heads: 16
+training:
+  max_steps: 100000
+  batch_size: 256
+  learning_rate: 3e-4
+  warmup_steps: 3000
+  weight_decay: 0.01
+  max_grad_norm: 2.0
+  seed: 34657
+  gradient_accumulation_steps: 4
+  num_workers: 8
+  logdir: "logs"
+  save_every: 5000
+  ema_decay: 0.99
+  name: "bumblebot-ssl"
+data:
+  min_moves: 30
+  max_prediction_depth: 10
+  encoding: 'simplified'
+tracking:
+  experiment_name: "ForecastEngine-SSL"
+  tracking_uri: "file:./mlruns"
+  use_mlflow: true

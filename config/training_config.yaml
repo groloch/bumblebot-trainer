@@ -1,0 +1,29 @@
+type: "train"
+model: 
+  hidden_size: 1024
+  encoder:
+    num_layers: 12
+    intermediate_size: 1536
+    num_heads: 32
+training:
+  max_steps: 100000
+  batch_size: 512
+  learning_rate: 3e-4
+  warmup_steps: 1000
+  weight_decay: 0.01
+  max_grad_norm: 2.0
+  seed: 34657
+  gradient_accumulation_steps: 2
+  num_workers: 8
+  forecast_loss_weight: 1
+  logdir: "logs"
+  save_every: 5000
+  name: "bumblebot"
+data:
+  encoding: 'simplified'
+  datasets:
+    - 
+tracking:
+  experiment_name: "ForecastEngine"
+  tracking_uri: "file:./mlruns"
+  use_mlflow: true
