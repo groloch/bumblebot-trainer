@@ -8,7 +8,7 @@ from ...utils import encode_board, get_move_id, ChessConstants
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
     def __init__(self, min_moves: int, max_prediction_depth: int):
-        super().__init__(0, min_moves)
+        super().__init__(min_moves)
 
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth, num_proc=16
@@ -29,10 +29,10 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         game = self.dataset[idx]
         movelist = game['moves']
         board = chess.Board()
-        
+
         for k in range(self.min_moves+move_idx):
             board.push(chess.Move.from_uci(movelist[k]))
-        
+
         legal_moves = torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.bool)
         for move in board.legal_moves:
             legal_moves[get_move_id(move, board.turn)] = True
