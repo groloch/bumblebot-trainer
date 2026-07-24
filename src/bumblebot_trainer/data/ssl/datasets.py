@@ -3,7 +3,8 @@ import chess
 import numpy as np
 
 from ..game_datasets import LichessStandardGamesDataset
-from ...utils import encode_board, get_move_id, ChessConstants
+from ..utils import encode_board
+from ...utils import get_move_id, ChessConstants
 
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):

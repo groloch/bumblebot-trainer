@@ -152,11 +152,11 @@ class SSLTrainer(Trainer):
         super().__init__(config, config_path)
 
         # type hints
-        self.teacher: torch.nn.Module = ...
-        self.predictor: torch.nn.Module = ...
-        self.training_config: SSLTrainingConfig = ...
-        self.model_config: SSLModelConfig = ...
-        self.data_config: SSLDataConfig = ...
+        self.teacher: torch.nn.Module
+        self.predictor: torch.nn.Module
+        self.training_config: SSLTrainingConfig
+        self.model_config: SSLModelConfig
+        self.data_config: SSLDataConfig
         # \
 
     def _build_configs(self, config):
@@ -220,8 +220,8 @@ class SSLTrainer(Trainer):
         for partial_step, batch in enumerate(self.train_dataloader, start=1):
             tokens, tokens_, legal_moves, moves, moves_attention_mask = batch
 
-            tokens = tokens.to(self.device)
-            tokens_ = tokens_.to(self.device)
+            tokens = tokens.to(self.device, dtype=torch.bfloat16)
+            tokens_ = tokens_.to(self.device, dtype=torch.bfloat16)
 
             legal_moves = legal_moves.to(self.device, dtype=torch.bfloat16)
             moves = moves.to(self.device)

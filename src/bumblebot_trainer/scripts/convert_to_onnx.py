@@ -7,7 +7,7 @@ import onnx
 import chess
 
 from .. import build_model_config
-from ..utils import encode_board
+from ..data.utils import encode_board
 from ..modeling.ort import PVInferenceModel
 
 

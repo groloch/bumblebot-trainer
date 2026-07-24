@@ -40,3 +40,4 @@ class SSLTrainingConfig:
     logdir: str
     save_every: int
     ema_decay: float
+    name: str
