@@ -1,7 +1,7 @@
 type: "ssl"
 model:
   hidden_size: 1024
-  encoder_name: 'bert'
+  encoder_name: "cf"
   encoder:
     num_layers: 12
     intermediate_size: 1536
@@ -15,7 +15,7 @@ training:
   batch_size: 256
   learning_rate: 3e-4
   warmup_steps: 3000
-  weight_decay: 0.01
+  weight_decay: 0.00001
   max_grad_norm: 2.0
   seed: 34657
   gradient_accumulation_steps: 4

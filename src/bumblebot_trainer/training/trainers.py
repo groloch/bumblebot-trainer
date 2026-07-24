@@ -176,6 +176,9 @@ class SSLTrainer(Trainer):
         self.teacher = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(self.training_config.ema_decay))
         self.predictor = Predictor(self.predictor_config)
 
+        for p in self.teacher.parameters():
+            p.requires_grad = False
+
     def _load_datasets(self):
         dataset = LichessStandardGamesSSLDataset(
             min_moves=self.data_config.min_moves,
@@ -196,13 +199,13 @@ class SSLTrainer(Trainer):
 
     def run(self):
         self.model.train()
-        self.model.to(self.device, dtype=torch.bfloat16)
+        self.model.to(self.device)
 
         self.predictor.train()
-        self.predictor.to(self.device, dtype=torch.bfloat16)
+        self.predictor.to(self.device)
 
         self.teacher.eval()
-        self.teacher.to(self.device, dtype=torch.bfloat16)
+        self.teacher.to(self.device)
 
         self.optimizer.zero_grad(set_to_none=True)
 
@@ -221,23 +224,26 @@ class SSLTrainer(Trainer):
         for partial_step, batch in enumerate(self.train_dataloader, start=1):
             tokens, tokens_, legal_moves, moves, moves_attention_mask = batch
 
-            tokens = tokens.to(self.device, dtype=torch.bfloat16)
-            tokens_ = tokens_.to(self.device, dtype=torch.bfloat16)
+            tokens = tokens.to(self.device)
+            tokens_ = tokens_.to(self.device)
 
-            legal_moves = legal_moves.to(self.device, dtype=torch.bfloat16)
+            legal_moves = legal_moves.to(self.device, dtype=torch.float32)
             moves = moves.to(self.device)
             moves_attention_mask = moves_attention_mask.to(self.device)
 
             # jepa-like forward pass
-            student_embed, legal_logits, legal_loss = self.model(tokens, target=legal_moves)
-            prediction = self.predictor(student_embed, moves, moves_attention_mask)
-            with torch.no_grad():
-                target_embed, _, _ = self.teacher.module(tokens_)
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                with torch.no_grad():
+                    target_embed, _, _ = self.teacher.module(tokens_)
 
-            ssl_loss = F.smooth_l1_loss(prediction, target_embed.detach(), beta=0.1)
+                student_embed, legal_logits, legal_loss = self.model(tokens, target=legal_moves)
+                prediction = self.predictor(student_embed, moves, moves_attention_mask)
 
-            total_loss = ssl_loss / gradient_accumulation_steps
-            total_loss += legal_loss / gradient_accumulation_steps
+                ssl_loss = F.smooth_l1_loss(prediction, target_embed.detach(), beta=0.1)
+
+                total_loss = ssl_loss / gradient_accumulation_steps
+                total_loss += legal_loss / gradient_accumulation_steps
+
             total_loss.backward()
 
             acc_buffer.update('ssl_loss', ssl_loss.detach(), partial_step)
