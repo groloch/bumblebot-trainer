@@ -1,6 +1,6 @@
 mlruns/
 logs/
-config/
+config/*.yaml
 tb/
 _*.py
 !__init__.py
