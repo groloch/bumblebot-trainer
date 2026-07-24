@@ -2,7 +2,7 @@ mlruns/
 logs/
 config/
 tb/
-_*
+_*.py
 *.pgn
 .bashrc
 *__pycache__/
