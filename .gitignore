@@ -4,6 +4,7 @@ config/
 tb/
 _*.py
 !__init__.py
+!__main__.py
 *.pgn
 .bashrc
 *__pycache__/
