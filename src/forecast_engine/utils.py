@@ -21,9 +21,7 @@ class ChessVocabulary:
 
 class ChessConstants:
     NUM_POLICY_CLASSES = 4288 # 64x64 + 8x8x3 for promotions
-    CONTEXT_LENGTH = 70 # 64 squares + 1 CLS + 5 registers
-    N_FORECAST_CLASSES = 69 # 64 squares + 1 taken logit + 4 promotion logits
-    N_HORIZON_CLASSES = 3 # 0: close term, 1: medium term, 2: long term
+    CONTEXT_LENGTH = 64 # 64 squares
     MAX_NUMBER_OF_MOVES = 256
 
 

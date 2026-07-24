@@ -5,18 +5,23 @@ import torch.nn as nn
 from transformers import BertModel, BertConfig
 
 from .embedding import Embedding
-from .encoder import Encoder, EncoderOutput
-from .policy_head import LegalMovesHead
-from ..config.modeling_configs import PredictorConfig, EncoderConfig
+from .encoders import Encoder, EncoderOutput, build_encoder
+from .heads import PolicyHead, PolicyOutput
+from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
 
 
 class SSLChessModel(nn.Module):
-    def __init__(self, config: EncoderConfig):
+    """Chess model for JEPA-like training with modulable square-level training objectives
+    """
+    def __init__(self, config: SSLModelConfig):
         super().__init__()
         self.embedding = Embedding(config.hidden_size)
-        self.encoder = Encoder(config)
-        self.legalmoves_head = LegalMovesHead(
+        self.encoder = build_encoder(
+            config.encoder_name,
+            config=config.encoder_config
+        )
+        self.legalmoves_head = PolicyHead(
             hidden_size=config.hidden_size,
             loss_fn=nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([10]))
         )
@@ -37,7 +42,7 @@ class SSLChessModel(nn.Module):
         if target is None:
             return x, None, None
 
-        policy_out = self.legalmoves_head(sq_emb, target)
+        policy_out: PolicyOutput = self.legalmoves_head(sq_emb, target)
         logits = policy_out.logits
         loss = policy_out.loss
         return x, logits, loss
@@ -48,7 +53,7 @@ class Predictor(nn.Module):
         super().__init__()
 
         bert_config = BertConfig(
-            vocab_size=ChessConstants.NUM_POLICY_CLASSES + 1,  # for pad token
+            vocab_size=ChessConstants.NUM_POLICY_CLASSES + 1,
             hidden_size=config.hidden_size,
             num_hidden_layers=config.num_layers,
             num_attention_heads=config.num_heads,

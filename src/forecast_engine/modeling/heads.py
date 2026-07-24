@@ -8,7 +8,15 @@ class PolicyOutput(HeadOutput):
     pass
 
 
+class ValueOutput(HeadOutput):
+    pass
+
+
+
 class PolicyHead(nn.Module):
+    """Chessformer policy head from
+    https://arxiv.org/pdf/2605.19091
+    """
     def __init__(self, hidden_size: int, loss_fn: nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
@@ -62,6 +70,24 @@ class PolicyHead(nn.Module):
         return PolicyOutput(logits=logits, loss=loss)
 
 
-class LegalMovesHead(PolicyHead):
+class ValueHead(nn.Module):
+    """Simple MLP value head for chess position evaluation in expected win chance.
+    """
     def __init__(self, hidden_size: int, loss_fn: nn.Module):
-        super().__init__(hidden_size, loss_fn)
+        super().__init__()
+        self.value_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, 1)
+        )
+
+        self.loss_fn = loss_fn
+
+    def forward(self, cls_embedding: torch.Tensor, target: torch.Tensor = None) -> ValueOutput:
+        value = self.value_proj(cls_embedding).squeeze(-1)
+
+        if target is not None:
+            loss = self.loss_fn(nn.functional.sigmoid(value), target)
+        else:
+            loss = None
+        return ValueOutput(logits=value, loss=loss)

@@ -1,10 +1,11 @@
+import sys
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..encoder import Encoder
-from ..policy_head import PolicyHead
-from ..value_head import ValueHead
+from ..encoders import build_encoder
+from ..heads import PolicyHead, ValueHead
 from ..embedding import Embedding
 from ...config.modeling_configs import ModelConfig
 
@@ -12,11 +13,19 @@ from typing import List, Tuple, Optional
 
 
 class PVInferenceModel(nn.Module):
+    """Utility function to convert a model from a training run to a cleaner arch
+    used for inference in an engine using ORT.
+
+    This is deprecated and will be removed
+    """
     def __init__(self, model_config: ModelConfig):
         super().__init__()
+        sys.stderr.write(
+            'WARNING: PVInferenceModel is deprecated and will be removed in future versions.\n'
+            )
 
         self.embedding = Embedding(model_config.hidden_size)
-        self.encoder = Encoder(model_config.encoder_config)
+        self.encoder = build_encoder(model_config.encoder_name, config=model_config.encoder_config)
 
         cls_loss_fn = nn.CrossEntropyLoss(
             ignore_index=-100,
@@ -71,4 +80,3 @@ class PVInferenceModel(nn.Module):
 
 
         return policy, value
-
