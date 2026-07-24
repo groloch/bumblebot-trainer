@@ -1,0 +1,8 @@
+mlruns/
+logs/
+config/
+tb/
+_*
+*.pgn
+.bashrc
+*__pycache__/
