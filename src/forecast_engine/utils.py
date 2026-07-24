@@ -108,9 +108,3 @@ def get_move_from_id(index: int, turn: chess.Color) -> chess.Move:
         to_square = chess.square_mirror(to_square)
 
     return chess.Move(from_square, to_square, promotion=promotion)
-
-def model_parameters(model: torch.nn.Module):
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    return total_params, trainable_params
