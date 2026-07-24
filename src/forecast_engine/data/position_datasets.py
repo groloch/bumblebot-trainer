@@ -4,12 +4,9 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 import chess
-import chess.syzygy
-from datasets import load_dataset, VerificationMode
-from datasets_sql import query as sql_query
-import pandas as pd
 
-from ..utils import encode_board, eval_to_whitewinpercent, get_move_id, ChessConstants, ForecastVocabulary
+from .utils import encode_board
+from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
 
 from typing import Optional
 
@@ -33,6 +30,8 @@ class PositionDataset(Dataset):
         self.dataset = ...
 
         self.temperature = 0.1
+
+        self.encoding_style = 'simplified'
 
         self.taken_cls = 64
         self.promotion_cls_map = {
@@ -59,7 +58,7 @@ class PositionDataset(Dataset):
         Returns:
             tuple: A tuple containing the encoded board tokens and a target dictionary.
         """
-        tokens, hm, ep_square = encode_board(board)
+        tokens = encode_board(board, self.encoding_style)
 
         indices = torch.zeros((len(nodes),), dtype=torch.long)
         evals = torch.zeros((len(nodes),), dtype=torch.float)
@@ -90,8 +89,6 @@ class PositionDataset(Dataset):
 
         return (
             tokens,
-            hm,
-            ep_square,
             target_dict,
         )
 

@@ -14,7 +14,11 @@ class ChessModel(nn.Module):
     def __init__(self, model_config: ModelConfig):
         super().__init__()
 
-        self.embedding = Embedding(model_config.hidden_size)
+        self.embedding = Embedding(
+            model_config.input_size,
+            model_config.hidden_size,
+            model_config.intermediate_size
+        )
         self.encoder: Encoder = build_encoder(
             model_config.encoder_name,
             config=model_config.encoder_config
@@ -31,10 +35,8 @@ class ChessModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            hm: torch.Tensor,
-            epsq: torch.Tensor,
             target_dict: dict = {}) -> tuple[EncoderOutput, PolicyOutput, ValueOutput]:
-        x: EncoderOutput = self.embed(x, hm, epsq)
+        x: EncoderOutput = self.embed(x)
 
         policy_out: PolicyOutput = self.policy_head(
             x.squares_embeddings,
@@ -47,6 +49,6 @@ class ChessModel(nn.Module):
 
         return x, policy_out, value_out
 
-    def embed(self, x: torch.Tensor, hm: torch.Tensor, epsq: torch.Tensor) -> EncoderOutput:
-        return self.encoder(self.embedding(x, hm, epsq))
+    def embed(self, x: torch.Tensor) -> EncoderOutput:
+        return self.encoder(self.embedding(x))
 

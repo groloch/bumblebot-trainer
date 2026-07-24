@@ -63,28 +63,6 @@ def init_logdir(logdir: str, config_path: str) -> str:
     shutil.copy2(config_path, proposed_logdir)
     return proposed_logdir
 
-def forward_process_forecast(
-        forecast_target: torch.Tensor,
-        forecast_mask: torch.Tensor,
-        forecast_depth: int):
-    B, S = forecast_target.shape # S is total tokens (d * 64)
-    device = forecast_target.device
-
-    t = torch.rand(B, device=device)
-    mask_ratio = torch.sin(t * (math.pi / 2)) # cosine noise schedule (skewed towards 1)
-    rand_probs = torch.rand((B, S), device=device)
-
-    masked_rand_probs = torch.where(forecast_mask.bool(), rand_probs, torch.tensor(1.1, device=device))
-    loss_mask = (masked_rand_probs < mask_ratio.view(B, 1))
-
-    masked_trajectory = torch.where(
-        loss_mask,
-        ForecastVocabulary.MASK_TOKEN_ID(forecast_depth),
-        forecast_target
-    )
-
-    return masked_trajectory, loss_mask
-
 def train(config: dict, config_path: str):
     training_config = TrainingConfig(**config['training'])
     model_config = build_model_config(config['model'])
@@ -195,25 +173,17 @@ def train_run(
     acc_buffer = AccumulationBuffer(gradient_accumulation_steps, device)
 
     for partial_step, batch in enumerate(dataloader, start=1):
-        tokens, hm, ep_square, target_dict = batch
+        tokens, target_dict = batch
 
         tokens = tokens.to(device)
-        hm = hm.to(device, dtype=torch.bfloat16)
-        ep_square = ep_square.to(device)
         target = {
             k: v.to(device, dtype=torch.bfloat16)
             if k not in ('forecast_mask', 'forecast') else v.to(device)
             for k, v in target_dict.items()
         }
 
-        trajectory, target['loss_mask'] = forward_process_forecast(
-            target['forecast'], target['forecast_mask'], forecast_depth
-        )
-
         _, policy_out, value_out, forecast_out = model(
             tokens,
-            hm,
-            ep_square,
             None, # trajectory,
             None, # target['forecast_mask'],
             target

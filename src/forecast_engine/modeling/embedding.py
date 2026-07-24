@@ -5,23 +5,29 @@ from ..utils import ChessVocabulary, ChessConstants
 
 
 class Embedding(nn.Module):
-    def __init__(self, hidden_size: int):
+    """Simple implementation of an embedding layer with learnt positional encodings and a ffn layer
+    after embedding.
+    """
+    def __init__(self, input_size: int, hidden_size: int, intermediate_size: int):
         super().__init__()
-        self.embedding = nn.Embedding(ChessVocabulary.TOTAL_TOKENS, hidden_size)
+        self.embedding = nn.Linear(
+            in_features=input_size, out_features=hidden_size
+        )
+        self.embed_norm = nn.LayerNorm(hidden_size)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size),
+            nn.GELU(),
+            nn.Linear(intermediate_size, hidden_size),
+            nn.LayerNorm(hidden_size)
+        )
+        self.positional_encoding = nn.Parameter(
+            torch.zeros(ChessConstants.CONTEXT_LENGTH, hidden_size), requires_grad=True
+        )
 
-        self.pos = nn.Parameter(torch.randn(ChessConstants.CONTEXT_LENGTH, hidden_size) * 0.02)
-        self.epsq_bias = nn.Parameter(torch.randn(1, hidden_size) * 0.02)
+    def forward(self, tokens):
+        x = self.embedding(tokens) + self.positional_encoding
+        x = self.embed_norm(x)
 
-        self.hm_embed = nn.Linear(1, 2*hidden_size)
-
-    def forward(self, tokens, hm, epsq):
-        x = self.embedding(tokens) + self.pos
-
-        mask = (epsq != -1).to(x.dtype).view(-1, 1, 1)
-        x = x + mask * self.epsq_bias
-
-        a, m = self.hm_embed(hm.unsqueeze(-1)).chunk(2, dim=-1)
-        x[:, -1, :] *= a
-        x[:, -1, :] += m
+        x = self.ffn(x) + x
 
         return x

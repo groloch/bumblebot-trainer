@@ -32,20 +32,16 @@ def export(logdir):
     ]
     encoded = [encode_board(pos) for pos in positions]
     x = torch.stack([e[0] for e in encoded], dim=0).to('cuda')
-    hm = torch.stack([e[1] for e in encoded], dim=0).to('cuda', dtype=torch.float16)
-    epsq = torch.stack([e[2] for e in encoded], dim=0).to('cuda')
 
-    example_input = (x, hm, epsq)
+    example_input = (x,)
 
     onnx_program = torch.onnx.export(
         model,
         example_input,
-        input_names=['x', 'hm', 'epsq'],
+        input_names=['x'],
         output_names=['policy', 'value'],
         dynamic_axes={
             'x': {0: 'batch_size'},
-            'hm': {0: 'batch_size'},
-            'epsq': {0: 'batch_size'},
             'policy': {0: 'batch_size'},
             'value': {0: 'batch_size'}
         },

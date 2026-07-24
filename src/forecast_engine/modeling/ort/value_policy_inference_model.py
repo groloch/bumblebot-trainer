@@ -24,7 +24,11 @@ class PVInferenceModel(nn.Module):
             'WARNING: PVInferenceModel is deprecated and will be removed in future versions.\n'
             )
 
-        self.embedding = Embedding(model_config.hidden_size)
+        self.embedding = Embedding(
+            model_config.input_size,
+            model_config.hidden_size,
+            model_config.intermediate_size
+        )
         self.encoder = build_encoder(model_config.encoder_name, config=model_config.encoder_config)
 
         cls_loss_fn = nn.CrossEntropyLoss(
@@ -38,11 +42,10 @@ class PVInferenceModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            hm: torch.Tensor,
-            epsq: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+            ) -> Tuple[torch.Tensor, torch.Tensor]:
         B = x.size(0)
 
-        x = self.embedding(x, hm, epsq)
+        x = self.embedding(x)
         x = self.encoder.transformer(x)
         squares_embeddings = x[:, :64, :]
         cls_embedding = x[:, 64, :]

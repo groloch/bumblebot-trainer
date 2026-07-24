@@ -38,7 +38,7 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             legal_moves[get_move_id(move, board.turn)] = True
 
 
-        tokens, hm, ep_square = encode_board(board)
+        tokens = encode_board(board, self.encoding_style)
         movelist_ = torch.zeros(target_idx - move_idx, dtype=torch.long)
 
         for k in range(self.min_moves+move_idx, self.min_moves+target_idx):
@@ -46,6 +46,6 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             movelist_[k - (self.min_moves+move_idx)] = get_move_id(move, board.turn)
             board.push(move)
 
-        tokens_, hm_, ep_square_ = encode_board(board)
+        tokens_ = encode_board(board, self.encoding_style)
 
-        return tokens, hm, ep_square, tokens_, hm_, ep_square_, legal_moves, movelist_, target_idx - move_idx
+        return tokens, tokens_, legal_moves, movelist_, target_idx - move_idx

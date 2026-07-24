@@ -142,18 +142,16 @@ def tune_run(
 
     for partial_step, batch in enumerate(dataloader, start=1):
 
-        tokens, hm, ep_square, target_dict = batch
+        tokens, target_dict = batch
 
         tokens = tokens.to(device)
-        hm = hm.to(device, dtype=torch.bfloat16)
-        ep_square = ep_square.to(device)
         target = {
             k: v.to(device) for k, v in target_dict.items()
         }
         target['value'] = target['value'].to(dtype=torch.bfloat16)
 
         with torch.no_grad():
-            embeddings = model.embed(tokens, hm, ep_square)
+            embeddings = model.embed(tokens)
         value_out = model.value_head(embeddings.cls_embedding, target['value'])
 
         total_loss = value_out.loss

@@ -16,7 +16,11 @@ class SSLChessModel(nn.Module):
     """
     def __init__(self, config: SSLModelConfig):
         super().__init__()
-        self.embedding = Embedding(config.hidden_size)
+        self.embedding = Embedding(
+            config.input_size,
+            config.hidden_size,
+            config.intermediate_size
+        )
         self.encoder = build_encoder(
             config.encoder_name,
             config=config.encoder_config
@@ -29,11 +33,9 @@ class SSLChessModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            hm: torch.Tensor,
-            epsq: torch.Tensor,
             target: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor | None]:
 
-        x = self.embedding(x, hm, epsq)
+        x = self.embedding(x)
         x: EncoderOutput = self.encoder(x)
         sq_emb = x.squares_embeddings
         x = x.cls_embedding

@@ -36,34 +36,11 @@ class ForecastVocabulary:
     @classmethod
     def NUM_FORECAST_CLASSES(cls, forecast_depth):
         return 1 + cls.HORIZON_OFFSET * forecast_depth
-    
+
     @classmethod
     def MASK_TOKEN_ID(cls, forecast_depth):
         return cls.HORIZON_OFFSET * forecast_depth
 
-
-def encode_board(board: chess.Board):
-    if board.turn == chess.BLACK:
-        board = board.mirror()
-    tokens = [ChessVocabulary.PIECE_TOKENS[board.piece_at(s)] for s in range(64)]
-    tokens += [
-        ChessVocabulary.CLS_TOKEN_ID,
-        ChessVocabulary.CASTLING_BASE + (0 if board.has_kingside_castling_rights(chess.WHITE) else 1),
-        ChessVocabulary.CASTLING_BASE + (2 if board.has_queenside_castling_rights(chess.WHITE) else 3),
-        ChessVocabulary.CASTLING_BASE + (4 if board.has_kingside_castling_rights(chess.BLACK) else 5),
-        ChessVocabulary.CASTLING_BASE + (6 if board.has_queenside_castling_rights(chess.BLACK) else 7),
-        ChessVocabulary.HALFMOVE_TOKEN
-    ]
-
-    ep_square = board.ep_square
-    if ep_square is None:
-        ep_square = -1
-
-    return (
-        torch.tensor(tokens, dtype=torch.long),
-        torch.tensor(min(board.halfmove_clock, 50)/50.0, dtype=torch.float),
-        torch.tensor(ep_square, dtype=torch.long)
-    )
 
 def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
     """Converts position evaluation to win% (white's perspective) according to:
@@ -94,7 +71,7 @@ def whitewinpercent_to_cp(winpercent: float, magic=0.00368208):
 def get_move_id(move: chess.Move, turn:chess.Color):
     from_square = move.from_square
     to_square = move.to_square
- 
+
     if turn == chess.BLACK: # white's perspective
         from_square = chess.square_mirror(from_square)
         to_square = chess.square_mirror(to_square)

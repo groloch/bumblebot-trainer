@@ -7,7 +7,8 @@ from tqdm import tqdm
 import chess
 
 from ..modeling.model import ChessModel
-from ..utils import encode_board, get_move_id, get_move_from_id, ChessConstants
+from ..data.utils import encode_board
+from ..utils import get_move_id, get_move_from_id, ChessConstants
 from .. import build_model_config
 from ..config.modeling_configs import ModelConfig
 
@@ -29,7 +30,7 @@ class Player:
         self.model.to('cuda', dtype=torch.float16)
 
     def get_move(self, board):
-        x, hm, epsq = encode_board(board)
+        x = encode_board(board)
         x = x.unsqueeze(0).to('cuda')
         hm = hm.unsqueeze(0).to('cuda', dtype=torch.float16)
         epsq = epsq.unsqueeze(0).to('cuda')
@@ -46,7 +47,7 @@ class Player:
 
 
         with torch.inference_mode():
-            _, policy_out, _, _ = self.model(x, hm, epsq)
+            _, policy_out, _, _ = self.model(x)
             policy_out = policy_out.logits.squeeze(0)
             policy_out = policy_out + legal_mask
             probs = torch.softmax(policy_out, dim=0)
