@@ -13,7 +13,7 @@ from ..modeling.model import ChessModel
 from ..modeling.heads import PolicyOutput, ValueOutput
 from ..modeling.ssl import SSLChessModel, Predictor
 from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollateFn
-from ..tracking import AccumulationBuffer, binary_f1, accuracy
+from ..tracking import AccumulationBuffer, binary_f1, multiclass_f1
 
 from ..config import (
     TrainingConfig,
@@ -267,7 +267,7 @@ class SSLTrainer(Trainer):
 
             acc_buffer.update('attacks_loss_unscaled', attacks_loss.detach(), partial_step)
             acc_buffer.update('attacks_loss', attacks_loss.detach() * self.training_config.attacks_loss_weight, partial_step)
-            acc_buffer.update('attacks_accuracy', accuracy(attacks_logits.detach(), attacks), partial_step)
+            acc_buffer.update('attacks_f1', multiclass_f1(attacks_logits.detach(), attacks), partial_step)
 
             if (partial_step + 1) % gradient_accumulation_steps == 0 or partial_step == len(self.train_dataloader):
                 torch.nn.utils.clip_grad_norm_(
@@ -291,7 +291,7 @@ class SSLTrainer(Trainer):
 
                 self.logger.update('attacks_loss_unscaled', acc_buffer.get_mean('attacks_loss_unscaled'))
                 self.logger.update('attacks_loss', acc_buffer.get_mean('attacks_loss'))
-                self.logger.update('attacks_accuracy', acc_buffer.get_mean('attacks_accuracy'))
+                self.logger.update('attacks_f1', acc_buffer.get_mean('attacks_f1'))
 
                 acc_buffer.reset()
                 pbar.update(1)
@@ -303,7 +303,7 @@ class SSLTrainer(Trainer):
                     break
 
                 if step >= 100 and step % 10 == 0:
-                    pbar.set_description(f'SSL Training | {self.logger.log(step, exclude_if_contains='unscaled')}')
+                    pbar.set_description(f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled'])}')
 
                 if step % self.training_config.save_every == 0:
                     self.ckpt(
