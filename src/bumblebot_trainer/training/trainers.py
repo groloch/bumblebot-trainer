@@ -303,7 +303,9 @@ class SSLTrainer(Trainer):
                     break
 
                 if step >= 100 and step % 10 == 0:
-                    pbar.set_description(f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled'])}')
+                    pbar.set_description(
+                        f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled'])}'
+                    )
 
                 if step % self.training_config.save_every == 0:
                     self.ckpt(
