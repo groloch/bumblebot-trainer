@@ -244,7 +244,7 @@ class SSLTrainer(Trainer):
 
                 student_embed, logits, losses = self.model(
                     tokens,
-                    target={'legal': legal_moves_, 'attacks': attacks_}
+                    target={'legal': legal_moves, 'attacks': attacks}
                 )
                 pred_raw, pred_norm = self.predictor(student_embed, moves, moves_attention_mask)
 
@@ -258,7 +258,7 @@ class SSLTrainer(Trainer):
 
                 perceptive_logits, perceptive_losses = self.teacher.module.heads_out(
                     pred_raw,
-                    target={'legal': legal_moves, 'attacks': attacks}
+                    target={'legal': legal_moves_, 'attacks': attacks_}
                 )
 
                 perceptive_legal_loss = perceptive_losses['legal']
@@ -315,7 +315,7 @@ class SSLTrainer(Trainer):
                 partial_step
             )
             acc_buffer.update(
-                'perceptive_legal_f1', binary_f1(perceptive_legal_logits.detach(), legal_moves),
+                'perceptive_legal_f1', binary_f1(perceptive_legal_logits.detach(), legal_moves_),
                 partial_step
             )
 
@@ -330,7 +330,7 @@ class SSLTrainer(Trainer):
                 partial_step
             )
             acc_buffer.update(
-                'perceptive_attacks_f1', multiclass_f1(perceptive_attacks_logits.detach(), attacks),
+                'perceptive_attacks_f1', multiclass_f1(perceptive_attacks_logits.detach(), attacks_),
                 partial_step
             )
             # \ metrics

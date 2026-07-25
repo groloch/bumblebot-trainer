@@ -38,7 +38,7 @@ class SSLChessModel(nn.Module):
 
         self.attacks_head = SquareHead(
             hidden_size=config.hidden_size,
-            output_dim=ChessConstants.MAX_ATTACKERS * 2 + 1,
+            output_dim=ChessConstants.RELEVANT_ATTACKERS * 2 + 1,
             loss_fn=nn.CrossEntropyLoss()
         )
 
@@ -188,7 +188,5 @@ class Predictor(nn.Module):
         embedding = self.transformer(inputs_embeds=inputs_embeds, attention_mask=attention_mask).last_hidden_state
 
         prediction = embedding[:, :64, :]
-        prediction = nn.functional.normalize(prediction, p=2, dim=-1)
-        x = prediction
-        x_norm = nn.functional.normalize(x, p=2, dim=-1)
-        return x, x_norm
+        prediction_norm = nn.functional.normalize(prediction, p=2, dim=-1)
+        return prediction, prediction_norm

@@ -34,8 +34,8 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         for square in chess.SQUARES:
             attack_map[square] += len(board.attackers(chess.WHITE, square))
             attack_map[square] -= len(board.attackers(chess.BLACK, square))
-        attack_map += ChessConstants.MAX_ATTACKERS
-        attack_map.clamp_(0, ChessConstants.MAX_ATTACKERS * 2)
+        attack_map.clamp_(-ChessConstants.RELEVANT_ATTACKERS, ChessConstants.RELEVANT_ATTACKERS)
+        attack_map += ChessConstants.RELEVANT_ATTACKERS
         return attack_map.long()
 
     def __getitem__(self, idx):

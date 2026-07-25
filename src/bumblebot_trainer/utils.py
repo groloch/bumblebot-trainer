@@ -6,7 +6,9 @@ class ChessConstants:
     NUM_POLICY_CLASSES = 4288 # 64x64 + 8x8x3 for promotions
     CONTEXT_LENGTH = 64 # 64 squares
     MAX_NUMBER_OF_MOVES = 256
+
     MAX_ATTACKERS = 16
+    RELEVANT_ATTACKERS = 4
 
     NUM_PIECE_TYPES = 6
     NUM_COLORS = 2
