@@ -8,7 +8,7 @@ from tqdm import tqdm
 from .. import build_model_config
 from ..modeling.model import ChessModel
 from ..data.utils import encode_board
-from ..utils import whitewinpercent_to_cp, get_move_from_id, ForecastVocabulary
+from ..utils import whitewinpercent_to_cp, get_move_from_id
 from ..data.game_datasets import SingleGameDataset
 
 
@@ -43,11 +43,10 @@ def test_predictions(logdir):
     )
 
     valid_mask_expanded = valid_mask.unsqueeze(1).repeat(1, forecast_depth, 1).view(1, -1)
-    trajectories[valid_mask_expanded] = ForecastVocabulary.MASK_TOKEN_ID(forecast_depth)
 
     with torch.no_grad():
-        _, policy_out, value_out, forecast_out = model(
-            x, trajectories=trajectories, trajectories_padding_mask=valid_mask_expanded
+        _, policy_out, value_out = model(
+            x
         )
 
     policy_logits: torch.Tensor

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from ..utils import ChessVocabulary, ChessConstants
+from ..utils import ChessConstants
 
 
 class Embedding(nn.Module):

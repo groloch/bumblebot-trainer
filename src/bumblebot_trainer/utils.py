@@ -1,22 +1,5 @@
 import numpy as np
-import torch
 import chess
-
-
-class ChessVocabulary:
-    PIECE_TOKENS = {
-        None: 0,
-        chess.Piece(chess.PAWN, chess.WHITE): 1, chess.Piece(chess.KNIGHT, chess.WHITE): 2,
-        chess.Piece(chess.BISHOP, chess.WHITE): 3, chess.Piece(chess.ROOK, chess.WHITE): 4,
-        chess.Piece(chess.QUEEN, chess.WHITE): 5, chess.Piece(chess.KING, chess.WHITE): 6,
-        chess.Piece(chess.PAWN, chess.BLACK): 7, chess.Piece(chess.KNIGHT, chess.BLACK): 8,
-        chess.Piece(chess.BISHOP, chess.BLACK): 9, chess.Piece(chess.ROOK, chess.BLACK): 10,
-        chess.Piece(chess.QUEEN, chess.BLACK): 11, chess.Piece(chess.KING, chess.BLACK): 12,
-    }
-    CASTLING_BASE = 13
-    HALFMOVE_TOKEN = 21
-    CLS_TOKEN_ID = 22
-    TOTAL_TOKENS = 23
 
 
 class ChessConstants:
@@ -24,23 +7,6 @@ class ChessConstants:
     CONTEXT_LENGTH = 64 # 64 squares
     MAX_NUMBER_OF_MOVES = 256
     MAX_ATTACKERS = 16
-
-
-class ForecastVocabulary:
-    SQUARE_TOKENS = {i: i for i in range(64)}
-    TAKEN_TOKEN = 64
-    PROMOTION_TOKENS = {chess.ROOK: 65, chess.BISHOP: 66, chess.KNIGHT: 67, chess.QUEEN: 68}
-    HORIZON_OFFSET = 69
-
-    PER_HORIZON_CTX_LENGTH = 64
-
-    @classmethod
-    def NUM_FORECAST_CLASSES(cls, forecast_depth):
-        return 1 + cls.HORIZON_OFFSET * forecast_depth
-
-    @classmethod
-    def MASK_TOKEN_ID(cls, forecast_depth):
-        return cls.HORIZON_OFFSET * forecast_depth
 
 
 def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
