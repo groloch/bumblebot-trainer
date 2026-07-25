@@ -12,7 +12,7 @@ from .utils import build_model_config
 from ..modeling.model import ChessModel
 from ..modeling.heads import PolicyOutput, ValueOutput
 from ..modeling.ssl import SSLChessModel, Predictor
-from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollateFn
+from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollator
 from ..tracking import AccumulationBuffer, binary_f1, multiclass_f1
 
 from ..config import (
@@ -158,7 +158,7 @@ class SSLTrainer(Trainer):
         self.training_config: SSLTrainingConfig
         self.model_config: SSLModelConfig
         self.data_config: SSLDataConfig
-        # \
+        # \ type hints
 
     def _build_configs(self, config):
         self.training_config = SSLTrainingConfig(**config['training'])
@@ -195,7 +195,7 @@ class SSLTrainer(Trainer):
             shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
-            collate_fn=SSLCollateFn(self.data_config.max_prediction_depth),
+            collate_fn=SSLCollator(self.data_config.max_prediction_depth),
         )
 
     def run(self):
@@ -223,51 +223,117 @@ class SSLTrainer(Trainer):
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
 
         for partial_step, batch in enumerate(self.train_dataloader, start=1):
-            tokens, tokens_, legal_moves, attacks, moves, moves_attention_mask = batch
+            tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, moves, moves_attention_mask = batch
 
             tokens = tokens.to(self.device)
             tokens_ = tokens_.to(self.device)
 
             legal_moves = legal_moves.to(self.device, dtype=torch.float32)
             attacks = attacks.to(self.device, dtype=torch.long)
+
+            legal_moves_ = legal_moves_.to(self.device, dtype=torch.float32)
+            attacks_ = attacks_.to(self.device, dtype=torch.long)
+
             moves = moves.to(self.device)
             moves_attention_mask = moves_attention_mask.to(self.device)
 
             # jepa-like forward pass
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():
-                    target_embed, _, _ = self.teacher.module(tokens_)
+                    _, target_embed = self.teacher.module.embed(tokens_)
 
                 student_embed, logits, losses = self.model(
                     tokens,
+                    target={'legal': legal_moves_, 'attacks': attacks_}
+                )
+                pred_raw, pred_norm = self.predictor(student_embed, moves, moves_attention_mask)
+
+                legal_logits = logits['legal']
+                legal_loss = losses['legal']
+
+                attacks_logits = logits['attacks']
+                attacks_loss = losses['attacks']
+
+                ssl_loss = F.smooth_l1_loss(pred_norm, target_embed.detach(), beta=0.1)
+
+                perceptive_logits, perceptive_losses = self.teacher.module.heads_out(
+                    pred_raw,
                     target={'legal': legal_moves, 'attacks': attacks}
                 )
-                prediction = self.predictor(student_embed, moves, moves_attention_mask)
 
-                legal_loss = losses['legal']
-                legal_logits = logits['legal']
+                perceptive_legal_loss = perceptive_losses['legal']
+                perceptive_legal_logits = perceptive_logits['legal']
 
-                attacks_loss = losses['attacks']
-                attacks_logits = logits['attacks']
-
-                ssl_loss = F.smooth_l1_loss(prediction, target_embed.detach(), beta=0.1)
+                perceptive_attacks_loss = perceptive_losses['attacks']
+                perceptive_attacks_logits = perceptive_logits['attacks']
 
                 total_loss = ssl_loss / gradient_accumulation_steps * self.training_config.ssl_loss_weight
+
                 total_loss += legal_loss / gradient_accumulation_steps * self.training_config.legal_loss_weight
                 total_loss += attacks_loss / gradient_accumulation_steps * self.training_config.attacks_loss_weight
 
+                total_loss += perceptive_legal_loss / gradient_accumulation_steps * \
+                    self.training_config.legal_loss_weight * self.training_config.perceptive_loss_weight
+                total_loss += perceptive_attacks_loss / gradient_accumulation_steps * \
+                    self.training_config.attacks_loss_weight * self.training_config.perceptive_loss_weight
+
             total_loss.backward()
 
+            # metrics
+            # all metrics contain a sliding window average over the last 100 steps
+            # all losses contain a unscaled version to compare between runs
             acc_buffer.update('ssl_loss_unscaled', ssl_loss.detach(), partial_step)
-            acc_buffer.update('ssl_loss', ssl_loss.detach() * self.training_config.ssl_loss_weight, partial_step)
+            acc_buffer.update(
+                'ssl_loss',
+                ssl_loss.detach() * self.training_config.ssl_loss_weight,
+                partial_step
+            )
 
             acc_buffer.update('legal_loss_unscaled', legal_loss.detach(), partial_step)
-            acc_buffer.update('legal_loss', legal_loss.detach() * self.training_config.legal_loss_weight, partial_step)
+            acc_buffer.update(
+                'legal_loss',
+                legal_loss.detach() * self.training_config.legal_loss_weight,
+                partial_step
+            )
             acc_buffer.update('legal_f1', binary_f1(legal_logits.detach(), legal_moves), partial_step)
 
             acc_buffer.update('attacks_loss_unscaled', attacks_loss.detach(), partial_step)
-            acc_buffer.update('attacks_loss', attacks_loss.detach() * self.training_config.attacks_loss_weight, partial_step)
+            acc_buffer.update(
+                'attacks_loss',
+                attacks_loss.detach() * self.training_config.attacks_loss_weight,
+                partial_step
+            )
             acc_buffer.update('attacks_f1', multiclass_f1(attacks_logits.detach(), attacks), partial_step)
+
+            acc_buffer.update(
+                'perceptive_legal_loss_unscaled', perceptive_legal_loss.detach(),
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_legal_loss', perceptive_legal_loss.detach() * \
+                    self.training_config.legal_loss_weight * self.training_config.perceptive_loss_weight,
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_legal_f1', binary_f1(perceptive_legal_logits.detach(), legal_moves),
+                partial_step
+            )
+
+            acc_buffer.update(
+                'perceptive_attacks_loss_unscaled', perceptive_attacks_loss.detach(),
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_attacks_loss',
+                perceptive_attacks_loss.detach() * self.training_config.attacks_loss_weight * \
+                    self.training_config.perceptive_loss_weight,
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_attacks_f1', multiclass_f1(perceptive_attacks_logits.detach(), attacks),
+                partial_step
+            )
+            # \ metrics
 
             if (partial_step + 1) % gradient_accumulation_steps == 0 or partial_step == len(self.train_dataloader):
                 torch.nn.utils.clip_grad_norm_(
@@ -280,6 +346,7 @@ class SSLTrainer(Trainer):
 
                 self.teacher.update_parameters(self.model)
 
+                # tracking
                 self.logger.update('lr', self.scheduler.get_last_lr()[0])
 
                 self.logger.update('ssl_loss_unscaled', acc_buffer.get_mean('ssl_loss_unscaled'))
@@ -293,6 +360,21 @@ class SSLTrainer(Trainer):
                 self.logger.update('attacks_loss', acc_buffer.get_mean('attacks_loss'))
                 self.logger.update('attacks_f1', acc_buffer.get_mean('attacks_f1'))
 
+                self.logger.update(
+                    'perceptive_legal_loss_unscaled',
+                    acc_buffer.get_mean('perceptive_legal_loss_unscaled')
+                )
+                self.logger.update('perceptive_legal_loss', acc_buffer.get_mean('perceptive_legal_loss'))
+                self.logger.update('perceptive_legal_f1', acc_buffer.get_mean('perceptive_legal_f1'))
+
+                self.logger.update(
+                    'perceptive_attacks_loss_unscaled',
+                    acc_buffer.get_mean('perceptive_attacks_loss_unscaled')
+                )
+                self.logger.update('perceptive_attacks_loss', acc_buffer.get_mean('perceptive_attacks_loss'))
+                self.logger.update('perceptive_attacks_f1', acc_buffer.get_mean('perceptive_attacks_f1'))
+                # \ tracking
+
                 acc_buffer.reset()
                 pbar.update(1)
 
@@ -304,7 +386,7 @@ class SSLTrainer(Trainer):
 
                 if step >= 100 and step % 10 == 0:
                     pbar.set_description(
-                        f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled'])}'
+                        f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled', 'perceptive'])}'
                     )
 
                 if step % self.training_config.save_every == 0:

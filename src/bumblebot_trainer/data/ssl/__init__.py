@@ -1,2 +1,2 @@
 from .datasets import LichessStandardGamesSSLDataset
-from .utils import SSLCollateFn
+from .utils import SSLCollator, SSLConstants

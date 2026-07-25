@@ -8,6 +8,10 @@ class ChessConstants:
     MAX_NUMBER_OF_MOVES = 256
     MAX_ATTACKERS = 16
 
+    NUM_PIECE_TYPES = 6
+    NUM_COLORS = 2
+    NUM_SQUARES = 64
+
 
 def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
     """Converts position evaluation to win% (white's perspective) according to:

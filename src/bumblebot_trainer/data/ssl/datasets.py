@@ -3,11 +3,16 @@ import chess
 import numpy as np
 
 from ..game_datasets import LichessStandardGamesDataset
+from .utils import encode_move_for_predictor, SSLConstants
 from ..utils import encode_board
 from ...utils import get_move_id, ChessConstants
 
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
+    """Dataset used for the SSL pipeline. It provides board encoding (now and future),
+    the move sequence between the two boards, and the square level targets: legal moves and
+    attack maps for both boards.
+    """
     def __init__(self, min_moves: int, max_prediction_depth: int, encoding: str):
         super().__init__(min_moves, encoding)
 
@@ -19,6 +24,9 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         self.max_prediction_depth = max_prediction_depth
 
     def _get_relative_attack_map(self, board: chess.Board):
+        """Relative attack map: number of attackers (control) we have
+        over a square minus number of attackers they have.
+        """
         if board.turn == chess.BLACK:
             board = board.mirror()
 
@@ -57,15 +65,38 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
 
         tokens = encode_board(board, self.encoding)
         attacks = self._get_relative_attack_map(board)
-        movelist_ = torch.zeros(target_idx - move_idx, dtype=torch.long)
+        movelist_ = torch.zeros((target_idx - move_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
 
         _board = board.copy(stack=False)
         for k in range(self.min_moves+move_idx, self.min_moves+target_idx):
             move = chess.Move.from_uci(movelist[k])
-            movelist_[k - (self.min_moves+move_idx)] = get_move_id(move, board.turn)
+
+            moved_piece_type = _board.piece_at(move.from_square).piece_type
+
+            if _board.piece_at(move.to_square) is None:
+                if move.to_square == _board.ep_square and moved_piece_type == chess.PAWN:
+                    taken_piece_type = chess.PAWN
+                else:
+                    taken_piece_type = None
+            else:
+                if _board.piece_at(move.to_square).color == _board.turn:
+                    taken_piece_type = None
+                else:
+                    taken_piece_type = _board.piece_at(move.to_square).piece_type
+
+            movelist_[k - (self.min_moves+move_idx), :] = encode_move_for_predictor(
+                move=move,
+                piece_type=moved_piece_type,
+                taken_piece_type=taken_piece_type,
+                turn=_board.turn,
+                perspective=board.turn
+            )
             _board.push(move)
 
         tokens_ = encode_board(_board, self.encoding)
-        # attacks_ = self._get_relative_attack_map(_board)
+        attacks_ = self._get_relative_attack_map(_board)
+        legal_moves_ = torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.bool)
+        for move in _board.legal_moves:
+            legal_moves_[get_move_id(move, _board.turn)] = True
 
-        return tokens, tokens_, legal_moves, attacks, movelist_, target_idx - move_idx
+        return tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, movelist_, target_idx - move_idx

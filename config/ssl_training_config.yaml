@@ -30,6 +30,7 @@ training:
   legal_loss_weight: 1.0
   attacks_loss_weight: 1.0
   ssl_loss_weight: 1.0
+  perceptive_loss_weight: 0.1
 data:
   min_moves: 30
   max_prediction_depth: 10

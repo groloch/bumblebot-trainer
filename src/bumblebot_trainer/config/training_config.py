@@ -44,3 +44,4 @@ class SSLTrainingConfig:
     legal_loss_weight: float
     attacks_loss_weight: float
     ssl_loss_weight: float
+    perceptive_loss_weight: float
