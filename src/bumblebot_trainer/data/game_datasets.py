@@ -35,9 +35,16 @@ class LichessStandardGamesDataset(GamePositionDataset):
         super().__init__(min_moves, encoding)
         data_files = [
             'data/year=2025/month=01/train-00000-of-00072.parquet',
-            # 'data/year=2025/month=01/train-00001-of-00072.parquet',
-            # 'data/year=2025/month=01/train-00002-of-00072.parquet',
-            # 'data/year=2025/month=01/train-00003-of-00072.parquet',
+            'data/year=2025/month=01/train-00001-of-00072.parquet',
+            'data/year=2025/month=01/train-00002-of-00072.parquet',
+            'data/year=2025/month=01/train-00003-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00004-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00005-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00006-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00007-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00008-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00009-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00010-of-00072.parquet',
         ]
 
         self.dataset = load_dataset(

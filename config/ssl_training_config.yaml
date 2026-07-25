@@ -27,6 +27,9 @@ training:
   save_every: 5000
   ema_decay: 0.99
   name: "bumblebot-ssl"
+  legal_loss_weight: 1.0
+  attacks_loss_weight: 1.0
+  ssl_loss_weight: 1.0
 data:
   min_moves: 30
   max_prediction_depth: 10

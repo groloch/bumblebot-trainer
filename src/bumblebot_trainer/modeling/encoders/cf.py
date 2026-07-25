@@ -62,10 +62,10 @@ class MHA(nn.Module):
 
         g = self.smolgen(x, shared_gen) # B h 64 64
 
-        attn = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        attn += g
-        attn = F.softmax(attn, dim=-1)
-        _x = attn @ v
+        dropout_p = 0.1 if self.training else 0.0
+        _x = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=g, dropout_p=dropout_p, is_causal=False
+        ) # this is a hack to use flash attention with custom attention bias (smolgen)
 
         _x = _x.transpose(1, 2).reshape(B, N, self.hidden_size)
 
@@ -75,40 +75,6 @@ class MHA(nn.Module):
 
 
 class Smolgen(nn.Module):
-    def __init__(
-            self,
-            hidden_size: int,
-            compressed_dim: int,
-            smolgen_dim: int,
-            gen_dim: int,
-            num_heads: int):
-        super().__init__()
-
-        self.hidden_size = hidden_size
-        self.compressed_dim = compressed_dim
-        self.smolgen_dim = smolgen_dim
-        self.num_heads = num_heads
-        self.gen_dim = gen_dim
-
-        self.compress = nn.Linear(hidden_size, compressed_dim)
-        self.l1 = nn.Linear(compressed_dim * 64, smolgen_dim)
-        self.n1 = nn.LayerNorm(smolgen_dim)
-        self.l2 = nn.Linear(smolgen_dim, gen_dim * num_heads)
-        self.n2 = nn.LayerNorm(gen_dim * num_heads)
-
-    def forward(self, x: torch.Tensor, shared_gen: nn.Module) -> torch.Tensor:
-        B = x.size(0)
-        x = self.compress(x).view(B, -1)
-        x = self.n1(F.silu(self.l1(x)))
-
-        x = self.n2(F.silu(self.l2(x)))
-        x = x.view(B, self.num_heads, self.gen_dim)
-
-        x = shared_gen(x)
-        x = x.view(B, self.num_heads, 64, 64)
-        return x
-
-class Smolgen2(nn.Module):
     def __init__(
             self,
             hidden_size: int,

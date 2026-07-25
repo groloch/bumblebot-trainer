@@ -6,7 +6,7 @@ from transformers import BertModel, BertConfig
 
 from .embedding import Embedding
 from .encoders import Encoder, EncoderOutput, build_encoder
-from .heads import PolicyHead, PolicyOutput
+from .heads import PolicyHead, PolicyOutput, SquareHead, HeadOutput
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
 
@@ -30,6 +30,12 @@ class SSLChessModel(nn.Module):
             loss_fn=nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([10]))
         )
 
+        self.attacks_head = SquareHead(
+            hidden_size=config.hidden_size,
+            output_dim=ChessConstants.MAX_ATTACKERS * 2 + 1,
+            loss_fn=nn.CrossEntropyLoss()
+        )
+
     def forward(
             self,
             x: torch.Tensor,
@@ -44,9 +50,10 @@ class SSLChessModel(nn.Module):
         if target is None:
             return x, None, None
 
-        policy_out: PolicyOutput = self.legalmoves_head(sq_emb, target)
-        logits = policy_out.logits
-        loss = policy_out.loss
+        legal_out: PolicyOutput = self.legalmoves_head(sq_emb, target)
+        attacks_out: HeadOutput = self.attacks_head(sq_emb, target)
+        logits = {'legal': legal_out.logits, 'attacks': attacks_out.logits}
+        loss = {'legal': legal_out.loss, 'attacks': attacks_out.loss}
         return x, logits, loss
 
 

@@ -1,7 +1,7 @@
 import torch
 
 
-def legal_f1(logits: torch.Tensor, targets: torch.Tensor) -> float:
+def f1(logits: torch.Tensor, targets: torch.Tensor) -> float:
     with torch.no_grad():
         predictions = logits > 0
         targets = targets > 0.5
@@ -14,3 +14,11 @@ def legal_f1(logits: torch.Tensor, targets: torch.Tensor) -> float:
             return 1.0
         f1 = (2.0 * tp) / denom
     return f1.item()
+
+def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
+    with torch.no_grad():
+        predictions = torch.argmax(logits, dim=-1)
+        correct = (predictions == targets).sum().float()
+        total = targets.numel()
+        accuracy = correct / total
+    return accuracy.item()

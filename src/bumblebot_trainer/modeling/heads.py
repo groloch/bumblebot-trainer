@@ -91,3 +91,23 @@ class ValueHead(nn.Module):
         else:
             loss = None
         return ValueOutput(logits=value, loss=loss)
+
+
+class SquareHead(nn.Module):
+    """Simple MLP head for square-level tasks
+    """
+    def __init__(self, hidden_size: int, output_dim: int, loss_fn: nn.Module):
+        super().__init__()
+
+        self.o_proj = nn.Linear(hidden_size, output_dim)
+        self.loss_fn = loss_fn
+
+    def forward(self, squares_embeddings: torch.Tensor, target: torch.Tensor = None) -> HeadOutput:
+        logits = self.o_proj(squares_embeddings)
+
+        if target is not None:
+            loss = self.loss_fn(logits, target)
+        else:
+            loss = None
+
+        return HeadOutput(logits=logits, loss=loss)

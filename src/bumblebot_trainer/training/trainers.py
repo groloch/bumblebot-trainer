@@ -13,7 +13,7 @@ from ..modeling.model import ChessModel
 from ..modeling.heads import PolicyOutput, ValueOutput
 from ..modeling.ssl import SSLChessModel, Predictor
 from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollateFn
-from ..tracking import AccumulationBuffer, legal_f1
+from ..tracking import AccumulationBuffer, f1, accuracy
 
 from ..config import (
     TrainingConfig,
@@ -223,7 +223,7 @@ class SSLTrainer(Trainer):
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
 
         for partial_step, batch in enumerate(self.train_dataloader, start=1):
-            tokens, tokens_, legal_moves, moves, moves_attention_mask = batch
+            tokens, tokens_, legal_moves, attacks, moves, moves_attention_mask = batch
 
             tokens = tokens.to(self.device)
             tokens_ = tokens_.to(self.device)
@@ -237,19 +237,33 @@ class SSLTrainer(Trainer):
                 with torch.no_grad():
                     target_embed, _, _ = self.teacher.module(tokens_)
 
-                student_embed, legal_logits, legal_loss = self.model(tokens, target=legal_moves)
+                student_embed, logits, losses = self.model(tokens, target=legal_moves)
                 prediction = self.predictor(student_embed, moves, moves_attention_mask)
+
+                legal_loss = losses['legal']
+                legal_logits = logits['legal']
+
+                attacks_loss = losses['attacks']
+                attacks_logits = logits['attacks']
 
                 ssl_loss = F.smooth_l1_loss(prediction, target_embed.detach(), beta=0.1)
 
-                total_loss = ssl_loss / gradient_accumulation_steps
-                total_loss += legal_loss / gradient_accumulation_steps
+                total_loss = ssl_loss / gradient_accumulation_steps * self.training_config.ssl_loss_weight
+                total_loss += legal_loss / gradient_accumulation_steps * self.training_config.legal_loss_weight
+                total_loss += attacks_loss / gradient_accumulation_steps * self.training_config.attacks_loss_weight
 
             total_loss.backward()
 
-            acc_buffer.update('ssl_loss', ssl_loss.detach(), partial_step)
-            acc_buffer.update('legal_loss', legal_loss.detach(), partial_step)
-            acc_buffer.update('legal_f1', legal_f1(legal_logits.detach(), legal_moves), partial_step)
+            acc_buffer.update('ssl_loss_unscaled', ssl_loss.detach(), partial_step)
+            acc_buffer.update('ssl_loss', ssl_loss.detach() * self.training_config.ssl_loss_weight, partial_step)
+
+            acc_buffer.update('legal_loss_unscaled', legal_loss.detach(), partial_step)
+            acc_buffer.update('legal_loss', legal_loss.detach() * self.training_config.legal_loss_weight, partial_step)
+            acc_buffer.update('legal_f1', f1(legal_logits.detach(), legal_moves), partial_step)
+
+            acc_buffer.update('attacks_loss_unscaled', attacks_loss.detach(), partial_step)
+            acc_buffer.update('attacks_loss', attacks_loss.detach() * self.training_config.attacks_loss_weight, partial_step)
+            acc_buffer.update('attacks_accuracy', accuracy(attacks_logits.detach(), attacks), partial_step)
 
             if (partial_step + 1) % gradient_accumulation_steps == 0 or partial_step == len(self.train_dataloader):
                 torch.nn.utils.clip_grad_norm_(
@@ -263,9 +277,17 @@ class SSLTrainer(Trainer):
                 self.teacher.update_parameters(self.model)
 
                 self.logger.update('lr', self.scheduler.get_last_lr()[0])
+
+                self.logger.update('ssl_loss_unscaled', acc_buffer.get_mean('ssl_loss_unscaled'))
                 self.logger.update('ssl_loss', acc_buffer.get_mean('ssl_loss'))
+
+                self.logger.update('legal_loss_unscaled', acc_buffer.get_mean('legal_loss_unscaled'))
                 self.logger.update('legal_loss', acc_buffer.get_mean('legal_loss'))
                 self.logger.update('legal_f1', acc_buffer.get_mean('legal_f1'))
+
+                self.logger.update('attacks_loss_unscaled', acc_buffer.get_mean('attacks_loss_unscaled'))
+                self.logger.update('attacks_loss', acc_buffer.get_mean('attacks_loss'))
+                self.logger.update('attacks_accuracy', acc_buffer.get_mean('attacks_accuracy'))
 
                 acc_buffer.reset()
                 pbar.update(1)

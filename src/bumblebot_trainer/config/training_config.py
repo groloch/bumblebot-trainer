@@ -41,3 +41,6 @@ class SSLTrainingConfig:
     save_every: int
     ema_decay: float
     name: str
+    legal_loss_weight: float
+    attacks_loss_weight: float
+    ssl_loss_weight: float

@@ -7,12 +7,13 @@ class SSLCollateFn:
         self.max_lookahead = max_lookahead
 
     def __call__(self, batch):
-        tokens, tokens_, legal_moves, moves_list, lengths = zip(*batch)
+        tokens, tokens_, legal_moves, attacks, moves_list, lengths = zip(*batch)
 
         tokens = torch.stack(tokens)
         tokens_ = torch.stack(tokens_)
 
         legal_moves = torch.stack(legal_moves)
+        attacks = torch.stack(attacks)
 
         batch_size = len(batch)
         max_len = 1 + self.max_lookahead
@@ -24,4 +25,4 @@ class SSLCollateFn:
         lengths = torch.tensor(lengths, dtype=torch.long)
         moves_attention_mask = (torch.arange(max_len).unsqueeze(0) < lengths.unsqueeze(1)).long()
 
-        return tokens, tokens_, legal_moves, moves, moves_attention_mask
+        return tokens, tokens_, legal_moves, attacks, moves, moves_attention_mask

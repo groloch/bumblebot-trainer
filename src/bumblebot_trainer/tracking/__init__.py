@@ -1,3 +1,3 @@
 from .metric_logger import MetricLogger, AccumulationBuffer
 
-from .metrics import legal_f1
+from .metrics import f1, accuracy

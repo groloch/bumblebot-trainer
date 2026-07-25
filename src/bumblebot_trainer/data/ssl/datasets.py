@@ -18,6 +18,18 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
 
         self.max_prediction_depth = max_prediction_depth
 
+    def _get_relative_attack_map(self, board: chess.Board):
+        if board.turn == chess.BLACK:
+            board = board.mirror()
+
+        attack_map = torch.zeros(64)
+        for square in chess.SQUARES:
+            attack_map[square] += len(board.attackers(chess.WHITE, square))
+            attack_map[square] -= len(board.attackers(chess.BLACK, square))
+        attack_map += ChessConstants.MAX_ATTACKERS
+        attack_map.clamp_(0, ChessConstants.MAX_ATTACKERS * 2)
+        return attack_map.long()
+
     def __getitem__(self, idx):
         game_length = self.dataset[idx]['game_length']
         move_idx = np.random.randint(0, game_length)
@@ -26,7 +38,7 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             move_idx,
             max_target_idx + 1,
         )
-        if target_idx % 2 != 0:
+        if (target_idx - move_idx) % 2 != 0:
             if target_idx == max_target_idx:
                 target_idx -= 1
             else:
@@ -43,15 +55,17 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         for move in board.legal_moves:
             legal_moves[get_move_id(move, board.turn)] = True
 
-
         tokens = encode_board(board, self.encoding)
+        attacks = self._get_relative_attack_map(board)
         movelist_ = torch.zeros(target_idx - move_idx, dtype=torch.long)
 
+        _board = board.copy(stack=False)
         for k in range(self.min_moves+move_idx, self.min_moves+target_idx):
             move = chess.Move.from_uci(movelist[k])
             movelist_[k - (self.min_moves+move_idx)] = get_move_id(move, board.turn)
-            board.push(move)
+            _board.push(move)
 
-        tokens_ = encode_board(board, self.encoding)
+        tokens_ = encode_board(_board, self.encoding)
+        # attacks_ = self._get_relative_attack_map(_board)
 
-        return tokens, tokens_, legal_moves, movelist_, target_idx - move_idx
+        return tokens, tokens_, legal_moves, attacks, movelist_, target_idx - move_idx
