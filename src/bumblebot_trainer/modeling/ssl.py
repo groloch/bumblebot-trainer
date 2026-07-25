@@ -39,7 +39,7 @@ class SSLChessModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            target: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+            target: dict[str, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
 
         x = self.embedding(x)
         x: EncoderOutput = self.encoder(x)
@@ -50,8 +50,8 @@ class SSLChessModel(nn.Module):
         if target is None:
             return x, None, None
 
-        legal_out: PolicyOutput = self.legalmoves_head(sq_emb, target)
-        attacks_out: HeadOutput = self.attacks_head(sq_emb, target)
+        legal_out: PolicyOutput = self.legalmoves_head(sq_emb, target['legal'])
+        attacks_out: HeadOutput = self.attacks_head(sq_emb, target['attacks'])
         logits = {'legal': legal_out.logits, 'attacks': attacks_out.logits}
         loss = {'legal': legal_out.loss, 'attacks': attacks_out.loss}
         return x, logits, loss

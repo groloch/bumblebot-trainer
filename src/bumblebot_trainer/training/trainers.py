@@ -13,7 +13,7 @@ from ..modeling.model import ChessModel
 from ..modeling.heads import PolicyOutput, ValueOutput
 from ..modeling.ssl import SSLChessModel, Predictor
 from ..data import CombinedPositionDataset, LichessStandardGamesSSLDataset, SSLCollateFn
-from ..tracking import AccumulationBuffer, f1, accuracy
+from ..tracking import AccumulationBuffer, binary_f1, accuracy
 
 from ..config import (
     TrainingConfig,
@@ -229,6 +229,7 @@ class SSLTrainer(Trainer):
             tokens_ = tokens_.to(self.device)
 
             legal_moves = legal_moves.to(self.device, dtype=torch.float32)
+            attacks = attacks.to(self.device, dtype=torch.long)
             moves = moves.to(self.device)
             moves_attention_mask = moves_attention_mask.to(self.device)
 
@@ -237,7 +238,10 @@ class SSLTrainer(Trainer):
                 with torch.no_grad():
                     target_embed, _, _ = self.teacher.module(tokens_)
 
-                student_embed, logits, losses = self.model(tokens, target=legal_moves)
+                student_embed, logits, losses = self.model(
+                    tokens,
+                    target={'legal': legal_moves, 'attacks': attacks}
+                )
                 prediction = self.predictor(student_embed, moves, moves_attention_mask)
 
                 legal_loss = losses['legal']
@@ -259,7 +263,7 @@ class SSLTrainer(Trainer):
 
             acc_buffer.update('legal_loss_unscaled', legal_loss.detach(), partial_step)
             acc_buffer.update('legal_loss', legal_loss.detach() * self.training_config.legal_loss_weight, partial_step)
-            acc_buffer.update('legal_f1', f1(legal_logits.detach(), legal_moves), partial_step)
+            acc_buffer.update('legal_f1', binary_f1(legal_logits.detach(), legal_moves), partial_step)
 
             acc_buffer.update('attacks_loss_unscaled', attacks_loss.detach(), partial_step)
             acc_buffer.update('attacks_loss', attacks_loss.detach() * self.training_config.attacks_loss_weight, partial_step)
@@ -299,7 +303,7 @@ class SSLTrainer(Trainer):
                     break
 
                 if step >= 100 and step % 10 == 0:
-                    pbar.set_description(f'SSL Training | {self.logger.log(step)}')
+                    pbar.set_description(f'SSL Training | {self.logger.log(step, exclude_if_contains='unscaled')}')
 
                 if step % self.training_config.save_every == 0:
                     self.ckpt(
