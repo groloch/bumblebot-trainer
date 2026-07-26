@@ -5,7 +5,7 @@ import torch
 from torch.optim import AdamW
 import mlflow
 
-from .utils import init_logdir, init_run, model_parameters
+from .utils import init_logdir, init_run, model_parameters, wsd_schedule
 from ..config import TrainingConfig, TrackingConfig
 from ..tracking import MetricLogger
 
@@ -46,18 +46,16 @@ class Trainer:
         self.optimizer = AdamW(
             self.model.parameters(),
             lr=self.training_config.learning_rate,
-            weight_decay=self.training_config.weight_decay
+            weight_decay=self.training_config.weight_decay,
+            betas=(0.9, 0.98),
+            eps=1e-7
         )
 
-        def lr_lambda(current_step):
-            if current_step < self.training_config.warmup_steps:
-                return float(current_step) / float(max(1, self.training_config.warmup_steps))
-            decay_start = self.training_config.max_steps * 0.9
-            if current_step < decay_start:
-                return 1.0
-            progress = (current_step - decay_start) / (self.training_config.max_steps - decay_start)
-            return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda)
+        lr_schedule_fn = wsd_schedule(
+            warmup_steps=self.training_config.warmup_steps,
+            max_steps=self.training_config.max_steps
+        )
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_schedule_fn)
 
         self.logger = MetricLogger(self.tracking_config.use_mlflow)
 

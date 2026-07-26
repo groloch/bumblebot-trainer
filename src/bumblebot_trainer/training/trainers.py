@@ -1,11 +1,12 @@
+import itertools
 import os
 
 import torch
 from torch.utils.data import DataLoader
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 import torch.nn.functional as F
-
 from tqdm import tqdm
+from adam_atan2_pytorch import AdamAtan2
 
 from . import Trainer
 from .utils import build_model_config
@@ -152,6 +153,8 @@ class SSLTrainer(Trainer):
     def __init__(self, config, config_path):
         super().__init__(config, config_path)
 
+        self._build_optimizer()
+
         # type hints
         self.teacher: torch.nn.Module
         self.predictor: torch.nn.Module
@@ -159,6 +162,12 @@ class SSLTrainer(Trainer):
         self.model_config: SSLModelConfig
         self.data_config: SSLDataConfig
         # \ type hints
+
+    def _build_optimizer(self):
+        self.optimizer.add_param_group(
+            {'params': self.predictor.parameters()}
+        )
+        self.scheduler.base_lrs.append(self.training_config.learning_rate)
 
     def _build_configs(self, config):
         self.training_config = SSLTrainingConfig(**config['training'])
@@ -222,7 +231,7 @@ class SSLTrainer(Trainer):
 
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
 
-        for partial_step, batch in enumerate(self.train_dataloader, start=1):
+        for partial_step, batch in enumerate(self.train_dataloader):
             tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, moves, moves_attention_mask = batch
 
             tokens = tokens.to(self.device)
