@@ -18,7 +18,7 @@ def main(config_path: str):
 
         config['model']['intermediate_size'] = config['model']['encoder']['intermediate_size']
 
-    if config['type'] in ('pv', 'ssl'):
+    if config['type'] in ('pv', 'ssl', 'legal_attacks'):
         from .training import build_trainer
         trainer = build_trainer(config, config_path, config['type'])
 
@@ -28,7 +28,7 @@ def main(config_path: str):
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
-        print("Usage: python -m forecast_engine <config_path>")
+        print("Usage: python -m bumblebot_trainer <config_path>")
         sys.exit(1)
     config_path = sys.argv[1]
     main(config_path)
