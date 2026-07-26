@@ -1,10 +1,16 @@
+import os
+import itertools
+
 import torch
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from tqdm import tqdm
+from torch.optim import AdamW, Muon
+from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from . import Trainer
+from .utils import wsd_schedule
 from ..modeling import SSLChessModel, Predictor
 from ..data import LichessStandardGamesSSLDataset, SSLCollator
 from ..tracking import AccumulationBuffer, binary_f1, multiclass_f1
@@ -23,22 +29,86 @@ class SSLTrainer(Trainer):
     """
     def __init__(self, config, config_path):
         super().__init__(config, config_path)
-
-        self._build_optimizer()
-
         # type hints
         self.teacher: torch.nn.Module
         self.predictor: torch.nn.Module
+
         self.training_config: SSLTrainingConfig
         self.model_config: SSLModelConfig
         self.data_config: SSLDataConfig
+
+        self.muon_optimizer: Muon
+        self.adamw_optimizer: AdamW
+        self.muon_scheduler: torch.optim.lr_scheduler.LambdaLR
+        self.adamw_scheduler: torch.optim.lr_scheduler.LambdaLR
         # \ type hints
 
+        self._build_optimizer()
+
     def _build_optimizer(self):
-        self.optimizer.add_param_group(
-            {'params': self.predictor.parameters()}
+        muon_params = [
+            p for n, p in itertools.chain(
+                self.model.named_parameters(),
+                self.predictor.named_parameters()
+            ) if p.requires_grad and
+            p.ndim == 2 and
+            not any(nd in n for nd in ['head', 'embed'])
+        ]
+        muon_param_ids = {id(p) for p in muon_params}
+        adamw_params = [
+            p for n, p in itertools.chain(
+                self.model.named_parameters(),
+                self.predictor.named_parameters()
+            ) if p.requires_grad and
+            id(p) not in muon_param_ids
+        ]
+
+        self.muon_optimizer = Muon(
+            muon_params,
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay,
+            adjust_lr_fn='match_rms_adamw'
         )
-        self.scheduler.base_lrs.append(self.training_config.learning_rate)
+        self.adamw_optimizer = AdamW(
+            adamw_params,
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay,
+            betas=(0.9, 0.98),
+            eps=1e-7
+        )
+
+        lr_schedule_fn = wsd_schedule(
+            warmup_steps=self.training_config.warmup_steps,
+            max_steps=self.training_config.max_steps
+        )
+        self.muon_scheduler = LambdaLR(self.muon_optimizer, lr_schedule_fn)
+        self.adamw_scheduler = LambdaLR(self.adamw_optimizer, lr_schedule_fn)
+
+        del self.optimizer
+        del self.scheduler
+
+    def ckpt(self, step=None, training_state=True, additional_modules=None):
+        if training_state:
+            optimizer_name = 'muon_optimizer.pth'
+            adamw_optimizer_name = 'adamw_optimizer.pth'
+            muon_scheduler_name = 'muon_scheduler.pth'
+            adamw_scheduler_name = 'adamw_scheduler.pth'
+            torch.save(self.muon_optimizer.state_dict(), os.path.join(self.logdir, optimizer_name))
+            torch.save(self.adamw_optimizer.state_dict(), os.path.join(self.logdir, adamw_optimizer_name))
+            torch.save(self.muon_scheduler.state_dict(), os.path.join(self.logdir, muon_scheduler_name))
+            torch.save(self.adamw_scheduler.state_dict(), os.path.join(self.logdir, adamw_scheduler_name))
+        super().ckpt(step=step, training_state=False, additional_modules=additional_modules)
+
+    def _optimizer_step(self):
+        self.muon_optimizer.step()
+        self.adamw_optimizer.step()
+
+        self.muon_scheduler.step()
+        self.adamw_scheduler.step()
+
+    def _optimizer_zero_grad(self, set_to_none=True):
+        self.muon_optimizer.zero_grad(set_to_none=set_to_none)
+        self.adamw_optimizer.zero_grad(set_to_none=set_to_none)
 
     def _build_configs(self, config):
         self.training_config = SSLTrainingConfig(**config['training'])
@@ -75,7 +145,7 @@ class SSLTrainer(Trainer):
             shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
-            collate_fn=SSLCollator(self.data_config.max_prediction_depth),
+            collate_fn=SSLCollator(self.data_config.max_prediction_depth)
         )
 
     def run(self):
@@ -88,7 +158,7 @@ class SSLTrainer(Trainer):
         self.teacher.eval()
         self.teacher.to(self.device)
 
-        self.optimizer.zero_grad(set_to_none=True)
+        self._optimizer_zero_grad(set_to_none=True)
 
         gradient_accumulation_steps = self.training_config.gradient_accumulation_steps
 
@@ -221,13 +291,12 @@ class SSLTrainer(Trainer):
                     max_norm=self.training_config.max_grad_norm,
                 )
 
-                self.optimizer.step()
-                self.scheduler.step()
+                self._optimizer_step()
 
                 self.teacher.update_parameters(self.model)
 
                 # tracking
-                self.logger.update('lr', self.scheduler.get_last_lr()[0])
+                self.logger.update('lr', self.adamw_scheduler.get_last_lr()[0])
 
                 self.logger.update('ssl_loss_unscaled', acc_buffer.get_mean('ssl_loss_unscaled'))
                 self.logger.update('ssl_loss', acc_buffer.get_mean('ssl_loss'))
@@ -258,7 +327,7 @@ class SSLTrainer(Trainer):
                 acc_buffer.reset()
                 pbar.update(1)
 
-                self.optimizer.zero_grad(set_to_none=True)
+                self._optimizer_zero_grad(set_to_none=True)
 
                 step += 1
                 if step >= self.training_config.max_steps:

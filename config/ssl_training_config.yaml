@@ -17,14 +17,14 @@ training:
   max_steps: 100000
   batch_size: 256
   learning_rate: 3e-4
-  warmup_steps: 3000
+  warmup_steps: 1000
   weight_decay: 0.00001
   max_grad_norm: 2.0
   seed: 34657
   gradient_accumulation_steps: 4
   num_workers: 8
   logdir: "logs"
-  save_every: 5000
+  save_every: 1000
   ema_decay: 0.99
   name: "bumblebot-ssl"
   legal_loss_weight: 1.0
