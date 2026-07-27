@@ -45,7 +45,7 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
 
         game = self.dataset[idx]
         movelist = game['moves']
-        board = chess.Board()
+        board = chess.Board(chess960=True)
 
         for k in range(self.min_moves+move_idx):
             board.push(chess.Move.from_uci(movelist[k]))
@@ -82,8 +82,6 @@ class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
             if game_length <= 0:
                 continue
 
-            board = chess.Board()
-
             move_idx = np.random.randint(0, game_length)
             max_target_idx = min(move_idx + self.max_prediction_depth, game_length)
             target_idx = np.random.randint(
@@ -95,6 +93,8 @@ class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
                     target_idx -= 1
                 else:
                     target_idx += 1
+
+            board = chess.Board(chess960=True)
 
             for k in range(self.min_moves+move_idx):
                 board.push(chess.Move.from_uci(moves[k]))

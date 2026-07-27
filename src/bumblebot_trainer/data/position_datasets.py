@@ -1,14 +1,11 @@
-from dataclasses import dataclass
+import json
 
 import numpy as np
-import torch
 from torch.utils.data import Dataset
 import chess
+from datasets import load_dataset
 
-from .utils import encode_board, process_item, VariationNode
-from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
-
-from typing import Optional
+from .utils import process_item, VariationNode
 
 
 class PositionDataset(Dataset):
@@ -78,3 +75,29 @@ class SinglePositionDataset(PositionDataset):
 
     def __getitem__(self, index):
         return process_item(self.board, [], self.encoding, self.temperature)
+
+
+class Lc0PositionDataset(PositionDataset):
+    """Dataset of positions from lc0 T91 training chunks.
+    """
+
+    def __init__(self, directory: str, encoding: str):
+        super().__init__(encoding)
+
+        data_files = [
+            f'training-run2-test91-20251118-{x}{y}17.parquet'
+            for x in range(2)
+            for y in range(10)
+        ]
+
+        self.dataset = load_dataset(
+            'Maxlegrec/test91-data',
+            split='train',
+            data_files=data_files
+        )
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        pass

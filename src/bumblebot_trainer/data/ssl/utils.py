@@ -88,7 +88,6 @@ def encode_move_for_predictor(
     )
     return move_encoded
 
-
 def get_relative_attack_map(board: chess.Board):
     """Relative attack map: number of attackers (control) we have
     over a square minus number of attackers they have.

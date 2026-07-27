@@ -22,6 +22,8 @@ class SSLChessModel(nn.Module):
     """
     def __init__(self, config: SSLModelConfig):
         super().__init__()
+        self.config: SSLModelConfig = config
+
         self.embedding = Embedding(
             config.input_size,
             config.hidden_size,

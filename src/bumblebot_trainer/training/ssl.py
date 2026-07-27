@@ -12,7 +12,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from . import Trainer
 from .utils import wsd_schedule
 from ..modeling import SSLChessModel, Predictor
-from ..data import LichessStandardGamesSSLDataset, SSLCollator
+from ..data import LichessStandardGamesSSLDataset, SSLCollator, Lc0PositionDataset
 from ..tracking import AccumulationBuffer
 from ..tracking.metrics import (
     binary_f1_from_stats,
@@ -20,13 +20,16 @@ from ..tracking.metrics import (
     multiclass_confusion_matrix,
     multiclass_f1_from_confusion_matrix,
 )
+from ..modeling.utils import ssl_to_pv_model
 from ..config import (
     SSLTrainingConfig,
     SSLModelConfig,
     CFEncoderConfig,
     SSLDataConfig,
     PredictorConfig,
-    TrackingConfig
+    TrackingConfig,
+    PVTuningConfig,
+    Lc0DataConfig,
 )
 
 
@@ -590,3 +593,165 @@ class LegalAttacksTrainer(Trainer):
                         step=step,
                         training_state=True,
                     )
+
+
+class PVTuner(Trainer):
+    """Fine-tunes policy/value heads of a pre-trained model. The encoder and embedding are 
+    frozen.
+    """
+    def __init__(self, config, config_path):
+        super().__init__(config, config_path)
+        # type hints
+        self.training_config: PVTuningConfig
+        self.model_config: SSLModelConfig
+        self.data_config: Lc0DataConfig
+        # \ type hints
+
+        self._build_optimizer()
+
+    def _build_optimizer(self):
+        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = AdamW(
+            trainable_params,
+            lr=self.training_config.learning_rate,
+            weight_decay=self.training_config.weight_decay,
+            betas=(0.9, 0.98),
+            eps=1e-7
+        )
+        lr_schedule_fn = wsd_schedule(
+            warmup_steps=self.training_config.warmup_steps,
+            max_steps=self.training_config.max_steps
+        )
+        self.scheduler = LambdaLR(self.optimizer, lr_schedule_fn)
+
+    def _build_configs(self, config):
+        self.training_config = PVTuningConfig(**config['training'])
+
+        hidden_size = config['model']['hidden_size']
+        encoder_config = CFEncoderConfig(hidden_size=hidden_size, **config['model'].pop('encoder'))
+        self.model_config = SSLModelConfig(encoder_config=encoder_config, **config['model'])
+
+        self.tracking_config = TrackingConfig(**config['tracking'])
+        self.data_config = Lc0DataConfig(**config['data'])
+
+    def _build_model(self):
+        ssl_model = SSLChessModel(self.model_config)
+        state_dict = torch.load(
+            self.training_config.ssl_model_path,
+            map_location='cpu',
+            weights_only=True,
+        )
+        ssl_model.load_state_dict(state_dict)
+        self.model = ssl_to_pv_model(ssl_model)
+        del ssl_model
+
+        for param in self.model.encoder.parameters():
+            param.requires_grad = False
+        for param in self.model.embedding.parameters():
+            param.requires_grad = False
+
+    def _load_datasets(self):
+        dataset = Lc0PositionDataset(
+            directory=self.data_config.directory,
+            encoding=self.data_config.encoding,
+        )
+        print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
+
+        self.train_dataloader = DataLoader(
+            dataset,
+            batch_size=self.training_config.batch_size,
+            shuffle=True,
+            num_workers=self.training_config.num_workers,
+            pin_memory=True,
+        )
+
+    def run(self):
+        self.model.train()
+        self.model.to(self.device)
+
+        self.optimizer.zero_grad(set_to_none=True)
+
+        gradient_accumulation_steps = self.training_config.gradient_accumulation_steps
+
+        step = 0
+        total_steps = (len(self.train_dataloader)+gradient_accumulation_steps-1) // gradient_accumulation_steps
+        total_steps = min(
+            self.training_config.max_steps,
+            total_steps
+        )
+        pbar = tqdm(total=total_steps, desc='PV Tuning')
+
+        acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
+
+        for partial_step, batch in enumerate(self.train_dataloader):
+            tokens, target_dict = batch
+
+            tokens = tokens.to(self.device, non_blocking=True)
+            target = {
+                k: v.to(self.device, non_blocking=True)
+                for k, v in target_dict.items()
+            }
+
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
+                _, policy_out, value_out = self.model(tokens, target)
+
+                policy_loss = policy_out.loss
+                value_loss = value_out.loss
+
+                total_loss = policy_loss / gradient_accumulation_steps * \
+                    self.training_config.policy_loss_weight
+                if value_loss is not None:
+                    total_loss += value_loss / gradient_accumulation_steps * \
+                        self.training_config.value_loss_weight
+
+            total_loss.backward()
+
+            # metrics
+            acc_buffer.update('policy_loss', policy_loss.detach(), partial_step)
+            acc_buffer.update('value_loss', value_loss.detach(), partial_step)
+
+            accuracy = (
+                policy_out.logits.detach().argmax(dim=-1) == target['policy'].argmax(dim=-1)
+            ).float().mean()
+            acc_buffer.update('accuracy', accuracy, partial_step)
+
+            top3_accuracy = (
+                policy_out.logits.detach().topk(3, dim=-1).indices ==
+                target['policy'].argmax(dim=-1, keepdim=True)
+            ).any(dim=-1).float().mean()
+            acc_buffer.update('top3_accuracy', top3_accuracy, partial_step)
+            # \ metrics
+
+            if (partial_step + 1) % gradient_accumulation_steps == 0 or partial_step == len(self.train_dataloader):
+                torch.nn.utils.clip_grad_norm_(
+                    [p for p in self.model.parameters() if p.requires_grad],
+                    max_norm=self.training_config.max_grad_norm,
+                )
+
+                self.optimizer.step()
+                self.scheduler.step()
+
+                # tracking
+                self.logger.update('lr', self.scheduler.get_last_lr()[0])
+                self.logger.update('policy_loss', acc_buffer.get_mean('policy_loss'))
+                self.logger.update('value_loss', acc_buffer.get_mean('value_loss', ignore_zeros=True))
+                self.logger.update('accuracy', acc_buffer.get_mean('accuracy'))
+                self.logger.update('top3_accuracy', acc_buffer.get_mean('top3_accuracy'))
+                # \ tracking
+
+                acc_buffer.reset()
+                pbar.update(1)
+
+                self.optimizer.zero_grad(set_to_none=True)
+
+                step += 1
+                if step >= self.training_config.max_steps:
+                    break
+
+                if step >= 100 and step % 10 == 0:
+                    pbar.set_description(
+                        f'PV Tuning | {self.logger.log(step)}'
+                    )
+
+                if step % self.training_config.save_every == 0:
+                    self.ckpt(step=step, training_state=True)

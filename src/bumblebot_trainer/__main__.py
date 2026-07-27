@@ -18,7 +18,7 @@ def main(config_path: str):
 
         config['model']['intermediate_size'] = config['model']['encoder']['intermediate_size']
 
-    if config['type'] in ('pv', 'ssl', 'legal_attacks'):
+    if config['type'] in ('pv', 'ssl', 'legal_attacks', 'pvtuner'):
         from .training import build_trainer
         trainer = build_trainer(config, config_path, config['type'])
 

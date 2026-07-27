@@ -27,7 +27,7 @@ class ChessModel(nn.Module):
         cls_loss_fn = nn.CrossEntropyLoss(
             ignore_index=-100,
         )
-        reg_loss_fn = nn.L1Loss()
+        reg_loss_fn = nn.functional.smooth_l1_loss
 
         self.policy_head = PolicyHead(model_config.hidden_size, cls_loss_fn)
         self.value_head = ValueHead(model_config.hidden_size, reg_loss_fn)

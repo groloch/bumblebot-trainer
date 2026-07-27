@@ -12,10 +12,16 @@ from typing import Literal, Optional
 
 @dataclass
 class VariationNode:
+    """Helper for distributional policy targets.
+    Any one of cp, mate, expected_result or probability should be provided.
+    See process_item for more details on how these are used.
+    """
+
     move: str
-    cp: Optional[int]
-    mate: Optional[int]
-    expected_result: Optional[float]
+    cp: Optional[int] = None
+    mate: Optional[int] = None
+    expected_result: Optional[float] = None
+    probability: Optional[float] = None
 
 
 def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = False) -> list[str]:
@@ -111,7 +117,8 @@ def process_item(
             board: chess.Board,
             nodes: list[VariationNode],
             encoding: str,
-            temperature: float = 0.1):
+            temperature: float = 0.1,
+            value: Optional[float] = None):
         """Utility function for datasets that converts chess position
         into batchable model inputs.
         """
@@ -120,8 +127,12 @@ def process_item(
         indices = torch.zeros((len(nodes),), dtype=torch.long)
         evals = torch.zeros((len(nodes),), dtype=torch.float)
 
+        does_reweight = all(node.probability is None for node in nodes)
+
         for i, node in enumerate(nodes):
-            if node.expected_result is not None:
+            if node.probability is not None:
+                expected_result = node.probability
+            elif node.expected_result is not None:
                 expected_result = node.expected_result
             else:
                 winpercent = eval_to_whitewinpercent(node.cp, node.mate)
@@ -134,10 +145,17 @@ def process_item(
 
         policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
         policy_target[indices] = evals
-        policy_target = policy_target / temperature
-        policy_target = torch.softmax(policy_target, dim=-1)
 
-        value_target = torch.max(evals)
+        if does_reweight:
+            policy_target = policy_target / temperature
+            policy_target = torch.softmax(policy_target, dim=-1)
+        else:
+            policy_target = policy_target.nan_to_num(neginf=0)
+
+        if value is not None:
+            value_target = torch.tensor(value)
+        else:
+            value_target = torch.max(evals)
 
         target_dict = {
             'policy': policy_target,

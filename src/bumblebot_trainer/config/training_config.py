@@ -45,3 +45,22 @@ class SSLTrainingConfig:
     attacks_loss_weight: float
     ssl_loss_weight: float
     perceptive_loss_weight: float
+
+
+@dataclass
+class PVTuningConfig:
+    max_steps: int
+    batch_size: int
+    learning_rate: float
+    warmup_steps: int
+    weight_decay: float
+    max_grad_norm: float
+    seed: int
+    gradient_accumulation_steps: int
+    num_workers: int
+    logdir: str
+    save_every: int
+    name: str
+    ssl_model_path: str
+    policy_loss_weight: float
+    value_loss_weight: float

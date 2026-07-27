@@ -90,7 +90,7 @@ class LichessStandardGamesDataset(GamePositionDataset):
         cp = None
         mate = None
 
-        node = VariationNode(uci_move, cp=cp, mate=mate, expected_result=None)
+        node = VariationNode(uci_move, cp=cp, mate=mate)
 
         return process_item(board, [node], self.encoding, self.temperature)
 
