@@ -5,18 +5,10 @@ import torch
 from torch.utils.data import Dataset
 import chess
 
-from .utils import encode_board
+from .utils import encode_board, process_item, VariationNode
 from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
 
 from typing import Optional
-
-
-@dataclass
-class VariationNode:
-    move: str
-    cp: Optional[int]
-    mate: Optional[int]
-    expected_result: Optional[float]
 
 
 class PositionDataset(Dataset):
@@ -44,56 +36,8 @@ class PositionDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
-    def _process_item(
-            self,
-            board: chess.Board,
-            nodes: list[VariationNode]):
-        """Utility function for children classes that converts chess position
-        into batchable model inputs.
-
-        Args:
-            board (chess.Board): The current position
-            nodes (list[VariationNode]): The list of variations to consider (move/q value pairs)
-
-        Returns:
-            tuple: A tuple containing the encoded board tokens and a target dictionary.
-        """
-        tokens = encode_board(board, self.encoding)
-
-        indices = torch.zeros((len(nodes),), dtype=torch.long)
-        evals = torch.zeros((len(nodes),), dtype=torch.float)
-
-        for i, node in enumerate(nodes):
-            if node.expected_result is not None:
-                expected_result = node.expected_result
-            else:
-                winpercent = eval_to_whitewinpercent(node.cp, node.mate)
-                if board.turn == chess.BLACK and winpercent != -100:
-                    winpercent = 100.0 - winpercent
-                expected_result = winpercent / 100.0
-
-            indices[i] = get_move_id(chess.Move.from_uci(node.move), board.turn)
-            evals[i] = expected_result
-
-        policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
-        policy_target[indices] = evals
-        policy_target = policy_target / self.temperature
-        policy_target = torch.softmax(policy_target, dim=-1)
-
-        value_target = torch.max(evals)
-
-        target_dict = {
-            'policy': policy_target,
-            'value': value_target,
-        }
-
-        return (
-            tokens,
-            target_dict,
-        )
-
     def __getitem__(self, index):
-        return NotImplementedError()
+        raise NotImplementedError()
 
 
 class CombinedPositionDataset(Dataset):
@@ -133,4 +77,4 @@ class SinglePositionDataset(PositionDataset):
         return 1
 
     def __getitem__(self, index):
-        return self._process_item(self.board, [])
+        return process_item(self.board, [], self.encoding, self.temperature)

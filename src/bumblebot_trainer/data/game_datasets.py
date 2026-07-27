@@ -4,8 +4,8 @@ import torch
 import chess, chess.pgn
 from datasets import load_dataset, VerificationMode
 
-from .position_datasets import PositionDataset, VariationNode
-from .utils import san_to_uci
+from .position_datasets import PositionDataset
+from .utils import san_to_uci, process_item, VariationNode
 
 
 class GamePositionDataset(PositionDataset):
@@ -92,14 +92,14 @@ class LichessStandardGamesDataset(GamePositionDataset):
 
         node = VariationNode(uci_move, cp=cp, mate=mate, expected_result=None)
 
-        return self._process_item(board, [node])
+        return process_item(board, [node], self.encoding, self.temperature)
 
 
 class SingleGameDataset(PositionDataset):
     """For testing purposes, a dataset made of a single game
     """
     def __init__(self, pgn, encoding: str):
-        super().__init__(encoding)
+        super().__init__(min_moves=0, encoding=encoding)
 
         with open(pgn) as f:
             game = chess.pgn.read_game(f)
@@ -117,4 +117,4 @@ class SingleGameDataset(PositionDataset):
         uci_move = self.board.parse_san(self.moves[0]).uci()
         node = VariationNode(uci_move, cp=None, mate=None, expected_result=None)
 
-        return self._process_item(self.board, [node])
+        return process_item(self.board, [node], self.encoding, self.temperature)

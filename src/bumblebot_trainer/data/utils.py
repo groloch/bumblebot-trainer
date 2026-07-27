@@ -1,10 +1,21 @@
 import sys
 import regex as re
+from dataclasses import dataclass
 
 import torch
 import chess
 
-from typing import Literal
+from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
+from typing import Literal, Optional
+
+
+
+@dataclass
+class VariationNode:
+    move: str
+    cp: Optional[int]
+    mate: Optional[int]
+    expected_result: Optional[float]
 
 
 def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = False) -> list[str]:
@@ -95,3 +106,45 @@ def encode_board(
 
     raise ValueError(f"Unknown encoding type: {encoding_type}")
     return None
+
+def process_item(
+            board: chess.Board,
+            nodes: list[VariationNode],
+            encoding: str,
+            temperature: float = 0.1):
+        """Utility function for datasets that converts chess position
+        into batchable model inputs.
+        """
+        tokens = encode_board(board, encoding)
+
+        indices = torch.zeros((len(nodes),), dtype=torch.long)
+        evals = torch.zeros((len(nodes),), dtype=torch.float)
+
+        for i, node in enumerate(nodes):
+            if node.expected_result is not None:
+                expected_result = node.expected_result
+            else:
+                winpercent = eval_to_whitewinpercent(node.cp, node.mate)
+                if board.turn == chess.BLACK and winpercent != -100:
+                    winpercent = 100.0 - winpercent
+                expected_result = winpercent / 100.0
+
+            indices[i] = get_move_id(chess.Move.from_uci(node.move), board.turn)
+            evals[i] = expected_result
+
+        policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
+        policy_target[indices] = evals
+        policy_target = policy_target / temperature
+        policy_target = torch.softmax(policy_target, dim=-1)
+
+        value_target = torch.max(evals)
+
+        target_dict = {
+            'policy': policy_target,
+            'value': value_target,
+        }
+
+        return (
+            tokens,
+            target_dict,
+        )
