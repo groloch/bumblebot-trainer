@@ -119,7 +119,7 @@ def encode_both_boards(
     attacks = get_relative_attack_map(board)
     movelist_ = torch.zeros((target_idx - move_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
 
-    _board = board.copy(stack=False)
+    _board = board.copy()
     for k in range(min_moves+move_idx, min_moves+target_idx):
         move = chess.Move.from_uci(movelist[k])
 

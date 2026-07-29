@@ -27,14 +27,14 @@ training:
   save_every: 1000
   ema_decay: 0.99
   name: "bumblebot-ssl"
-  legal_loss_weight: 1.0
-  attacks_loss_weight: 1.0
+  legal_loss_weight: 0.5
+  attacks_loss_weight: 0.1
   ssl_loss_weight: 1.0
-  perceptive_loss_weight: 0.1
+  perceptive_loss_weight: 2.0
 data:
   min_moves: 30
   max_prediction_depth: 10
-  encoding: 'lc0'
+  encoding: 'simplified'
 tracking:
   experiment_name: "ForecastEngine-SSL"
   tracking_uri: "file:./mlruns"

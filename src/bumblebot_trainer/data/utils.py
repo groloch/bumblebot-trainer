@@ -24,8 +24,10 @@ class VariationNode:
     probability: Optional[float] = None
 
 
-def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = False) -> list[str]:
-    """Convert a san movetext string to a list of uci moves."""
+def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = True) -> list[str]:
+    """Convert a san movetext string to a list of uci moves.
+    chess960 should be set to true to get king->rook castling moves encodings
+    """
     movetext = re.sub(r'\{[^}]*\}', '', movetext)
     board = chess.Board(start_fen, chess960=chess960)
     uci_moves = []
@@ -166,3 +168,95 @@ def process_item(
             tokens,
             target_dict,
         )
+
+def _backrank_sparse(board: chess.Board) -> bool:
+    first_rank = 0xFF
+    last_rank = 0xFF << 56
+
+    white_pieces = board.occupied_co[chess.WHITE]
+    black_pieces = board.occupied_co[chess.BLACK]
+
+    white_backrank_count = bin(first_rank & white_pieces).count('1')
+    black_backrank_count = bin(last_rank & black_pieces).count('1')
+
+    return white_backrank_count < 4 or black_backrank_count < 4
+
+def _majors_and_minors(board: chess.Board) -> int:
+    occupied = board.occupied
+    kings = board.kings
+    pawns = board.pawns
+    return bin(occupied & ~(kings | pawns)).count('1')
+
+def _score(y: int, white: int, black: int) -> int:
+    if white == 0 and black == 0:
+        return 0
+
+    if white == 1 and black == 0:
+        return 1 + (8 - y)
+    elif white == 2 and black == 0:
+        return (2 + (y - 2)) if y > 2 else 0
+    elif white == 3 and black == 0:
+        return (3 + (y - 1)) if y > 1 else 0
+    elif white == 4 and black == 0:
+        return (3 + (y - 1)) if y > 1 else 0
+
+    elif white == 0 and black == 1:
+        return 1 + y
+    elif white == 1 and black == 1:
+        return 5 + abs(4 - y)
+    elif white == 2 and black == 1:
+        return 4 + (y - 1)
+    elif white == 3 and black == 1:
+        return 5 + (y - 1)
+
+    elif white == 0 and black == 2:
+        return (2 + (6 - y)) if y < 6 else 0
+    elif white == 1 and black == 2:
+        return 4 + (7 - y)
+    elif white == 2 and black == 2:
+        return 7
+
+    elif white == 0 and black == 3:
+        return (3 + (7 - y)) if y < 7 else 0
+    elif white == 1 and black == 3:
+        return 5 + (7 - y)
+
+    elif white == 0 and black == 4:
+        return (3 + (7 - y)) if y < 7 else 0
+
+    return 0
+
+
+def _mixedness(board: chess.Board) -> int:
+    small_square = 0x0303
+
+    total_score = 0
+    white_pieces = board.occupied_co[chess.WHITE]
+    black_pieces = board.occupied_co[chess.BLACK]
+
+    for y in range(7):
+        for x in range(7):
+            region = small_square << (x + 8 * y)
+
+            white_count = bin(white_pieces & region).count('1')
+            black_count = bin(black_pieces & region).count('1')
+
+            total_score += _score(y + 1, white_count, black_count)
+
+    return total_score
+
+def get_game_phase(board: chess.Board) -> str:
+    """Gamephase classification, adapted from Lichess own codebase.
+    """
+    majors_minors = _majors_and_minors(board)
+
+    if majors_minors <= 6:
+        return 'endgame'
+
+    is_sparse = _backrank_sparse(board)
+    mix = _mixedness(board)
+
+    if majors_minors <= 10 or is_sparse or mix > 150:
+        return 'middlegame'
+
+    return 'opening'

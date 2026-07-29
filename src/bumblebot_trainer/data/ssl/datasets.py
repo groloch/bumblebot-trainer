@@ -1,17 +1,20 @@
-import torch
 import chess
 import numpy as np
 
 from ..game_datasets import LichessStandardGamesDataset
 from ..iterable_datasets import LichessStandardIterableDataset
-from .utils import (
-    encode_move_for_predictor,
-    SSLConstants,
-    get_relative_attack_map,
-    encode_both_boards
-)
-from ..utils import encode_board, san_to_uci
-from ...utils import get_move_id, ChessConstants
+from .utils import encode_both_boards
+from ..utils import san_to_uci
+
+
+def sample_ssl_future_indices(game_length: int, max_prediction_depth: int) -> tuple[int, int]:
+    move_idx = np.random.randint(0, game_length - 1)
+
+    max_lookahead = min(max_prediction_depth, game_length - move_idx)
+    max_even_lookahead = max_lookahead - (max_lookahead % 2)
+
+    lookahead = 2 * np.random.randint(1, max_even_lookahead // 2 + 1)
+    return move_idx, move_idx + lookahead
 
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
@@ -31,17 +34,11 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
 
     def __getitem__(self, idx):
         game_length = self.dataset[idx]['game_length']
-        move_idx = np.random.randint(0, game_length)
-        max_target_idx = min(move_idx + self.max_prediction_depth, game_length)
-        target_idx = np.random.randint(
-            move_idx,
-            max_target_idx + 1,
+
+        move_idx, target_idx = sample_ssl_future_indices(
+            game_length=game_length,
+            max_prediction_depth=self.max_prediction_depth,
         )
-        if (target_idx - move_idx) % 2 != 0:
-            if target_idx == max_target_idx:
-                target_idx -= 1
-            else:
-                target_idx += 1
 
         game = self.dataset[idx]
         movelist = game['moves']
@@ -79,20 +76,13 @@ class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
             moves = san_to_uci(item['movetext'])
             game_length = len(moves) - self.min_moves
 
-            if game_length <= 0:
+            if game_length < 2:
                 continue
 
-            move_idx = np.random.randint(0, game_length)
-            max_target_idx = min(move_idx + self.max_prediction_depth, game_length)
-            target_idx = np.random.randint(
-                move_idx,
-                max_target_idx + 1,
+            move_idx, target_idx = sample_ssl_future_indices(
+                game_length=game_length,
+                max_prediction_depth=self.max_prediction_depth,
             )
-            if (target_idx - move_idx) % 2 != 0:
-                if target_idx == max_target_idx:
-                    target_idx -= 1
-                else:
-                    target_idx += 1
 
             board = chess.Board(chess960=True)
 

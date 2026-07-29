@@ -5,7 +5,7 @@ from torch.utils.data import Dataset
 import chess
 from datasets import load_dataset
 
-from .utils import process_item, VariationNode
+from .utils import process_item, get_game_phase, VariationNode
 
 
 class PositionDataset(Dataset):
@@ -96,8 +96,24 @@ class Lc0PositionDataset(PositionDataset):
             data_files=data_files
         )
 
+        self.dataset = self.dataset.filter(
+            lambda x: get_game_phase(chess.Board(x['fen'])) != 'opening',
+            num_proc=16
+        )
+
     def __len__(self):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        pass
+        item = self.dataset[index]
+
+        board = chess.Board(item['fen'])
+
+        best_move_uci = item['best_move']
+        value = item['root_q']
+
+        node = VariationNode(
+            move=best_move_uci,
+            probability=1.0
+        )
+        return process_item(board, [node], self.encoding, value=value)
