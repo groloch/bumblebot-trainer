@@ -9,7 +9,7 @@ import numpy as np
 import mlflow
 
 from ..config import TrackingConfig
-from ..config_loading import build_model_config as build_runtime_model_config
+from ..utils import build_model_config as build_runtime_model_config
 
 
 def init_logdir(logdir: str, config_path: str) -> str:

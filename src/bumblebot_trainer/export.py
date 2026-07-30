@@ -6,11 +6,11 @@ import torch
 import gguf
 
 from .utils import load_config_file, build_model_config
+from .training.utils import model_parameters
 from .modeling import ChessModel
 
 
 _STEP_CKPT_RE = re.compile(r"^(?P<name>.+)_step(?P<step>\d+)\.pth$")
-
 
 
 def _find_config_path(logdir: Path) -> Path:
@@ -74,6 +74,8 @@ def _load_chess_model_from_run(logdir: Path, checkpoint_path: str | None):
 
     model_config = build_model_config(config['model'])
     model = ChessModel(model_config)
+    params, _ = model_parameters(model)
+    print(f'Loaded model of {params/1e6:.2f}M parameters')
 
     state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
     model.load_state_dict(state_dict)
