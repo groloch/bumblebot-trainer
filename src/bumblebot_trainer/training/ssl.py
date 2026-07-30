@@ -10,7 +10,7 @@ from torch.optim.lr_scheduler import LambdaLR
 from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 
 from . import Trainer
-from .utils import wsd_schedule
+from .utils import wsd_schedule, dropout_schedule
 from ..modeling import SSLChessModel, Predictor
 from ..data import LichessStandardGamesSSLDataset, SSLCollator, Lc0PositionDataset
 from ..tracking import AccumulationBuffer
@@ -30,6 +30,7 @@ from ..config import (
     TrackingConfig,
     PVTuningConfig,
     Lc0DataConfig,
+    DropoutScheduleConfig,
 )
 
 
@@ -120,7 +121,8 @@ class SSLTrainer(Trainer):
         self.adamw_optimizer.zero_grad(set_to_none=set_to_none)
 
     def _build_configs(self, config):
-        self.training_config = SSLTrainingConfig(**config['training'])
+        dropout_schedule_cfg = DropoutScheduleConfig(**config['training'].pop('dropout_schedule'))
+        self.training_config = SSLTrainingConfig(dropout_schedule=dropout_schedule_cfg, **config['training'])
 
         hidden_size = config['model']['hidden_size']
         encoder_config = CFEncoderConfig(hidden_size=hidden_size, **config['model'].pop('encoder'))
@@ -138,6 +140,15 @@ class SSLTrainer(Trainer):
 
         for p in self.teacher.parameters():
             p.requires_grad = False
+
+    def _update_dropout(self, perceptive_legal_f1: float):
+        ds = self.training_config.dropout_schedule
+        self._steps_since_dropout_update += 1
+        if (perceptive_legal_f1 >= ds.f1_threshold
+                and self._steps_since_dropout_update >= ds.min_steps_between_updates):
+            self._n_dropout_updates += 1
+            self._steps_since_dropout_update = 0
+            self._current_dropout = self._dropout_fn(self._n_dropout_updates)
 
     def _load_datasets(self):
         dataset = LichessStandardGamesSSLDataset(
@@ -170,6 +181,15 @@ class SSLTrainer(Trainer):
         self._optimizer_zero_grad(set_to_none=True)
 
         gradient_accumulation_steps = self.training_config.gradient_accumulation_steps
+        _ds = self.training_config.dropout_schedule
+        self._dropout_fn = dropout_schedule(
+            _ds.min_dropout,
+            _ds.max_dropout,
+            _ds.convergence_rate,
+        )
+        self._current_dropout = self._dropout_fn(0)
+        self._n_dropout_updates = 0
+        self._steps_since_dropout_update = 0
 
         step = 0
         total_steps = (len(self.train_dataloader)+gradient_accumulation_steps-1) // gradient_accumulation_steps
@@ -213,7 +233,12 @@ class SSLTrainer(Trainer):
                     tokens,
                     target={'legal': legal_moves, 'attacks': attacks}
                 )
-                pred_raw, pred_norm = self.predictor(student_embed, moves, moves_attention_mask)
+                pred_raw, pred_norm = self.predictor(
+                    student_embed,
+                    moves,
+                    moves_attention_mask,
+                    self._current_dropout
+                )
 
                 legal_logits = logits['legal']
                 legal_loss = losses['legal']
@@ -302,7 +327,7 @@ class SSLTrainer(Trainer):
             )
             # \ metrics
 
-            if (partial_step + 1) % gradient_accumulation_steps == 0 or partial_step == len(self.train_dataloader):
+            if (partial_step + 1) % gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(
                     list(self.model.parameters()) + list(self.predictor.parameters()),
                     max_norm=self.training_config.max_grad_norm,
@@ -314,6 +339,7 @@ class SSLTrainer(Trainer):
 
                 # tracking
                 self.logger.update('lr', self.adamw_scheduler.get_last_lr()[0])
+                self.logger.update('predictor_dropout', self._current_dropout)
 
                 self.logger.update('ssl_loss_unscaled', acc_buffer.get_mean('ssl_loss_unscaled'))
                 self.logger.update('ssl_loss', acc_buffer.get_mean('ssl_loss'))
@@ -334,10 +360,11 @@ class SSLTrainer(Trainer):
                     acc_buffer.get_mean('perceptive_legal_loss_unscaled')
                 )
                 self.logger.update('perceptive_legal_loss', acc_buffer.get_mean('perceptive_legal_loss'))
-                self.logger.update(
-                    'perceptive_legal_f1',
-                    binary_f1_from_stats(perceptive_legal_f1_stats).item()
-                )
+
+                _perceptive_legal_f1 = binary_f1_from_stats(perceptive_legal_f1_stats).item()
+                self.logger.update('perceptive_legal_f1', _perceptive_legal_f1)
+
+                self._update_dropout(_perceptive_legal_f1)
 
                 self.logger.update(
                     'perceptive_attacks_loss_unscaled',
@@ -365,7 +392,13 @@ class SSLTrainer(Trainer):
 
                 if step >= 100 and step % 10 == 0:
                     pbar.set_description(
-                        f'SSL Training | {self.logger.log(step, exclude_if_contains=['unscaled', 'perceptive'])}'
+                        f'SSL Training | {
+                            self.logger.log(step, exclude_if_contains=[
+                                'unscaled',
+                                'perceptive',
+                                'attacks'
+                            ])
+                        }'
                     )
 
                 if step % self.training_config.save_every == 0:
@@ -596,7 +629,7 @@ class LegalAttacksTrainer(Trainer):
 
 
 class PVTuner(Trainer):
-    """Fine-tunes policy/value heads of a pre-trained model. The encoder and embedding are 
+    """Fine-tunes policy/value heads of a pre-trained model. The encoder and embedding are
     frozen.
     """
     def __init__(self, config, config_path):
@@ -605,24 +638,85 @@ class PVTuner(Trainer):
         self.training_config: PVTuningConfig
         self.model_config: SSLModelConfig
         self.data_config: Lc0DataConfig
+
+        self.muon_optimizer: Muon | None
+        self.adamw_optimizer: AdamW
+        self.muon_scheduler: torch.optim.lr_scheduler.LambdaLR | None
+        self.adamw_scheduler: torch.optim.lr_scheduler.LambdaLR
         # \ type hints
 
         self._build_optimizer()
 
     def _build_optimizer(self):
-        trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        self.optimizer = AdamW(
-            trainable_params,
-            lr=self.training_config.learning_rate,
+        encoder_lr_factor = self.training_config.encoder_lr_factor
+        lr = self.training_config.learning_rate
+
+        if encoder_lr_factor == 0.0:
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+            for param in self.model.embedding.parameters():
+                param.requires_grad = False
+            self.muon_optimizer = None
+            self.muon_scheduler = None
+            adamw_param_groups = [
+                {'params': [p for p in self.model.parameters() if p.requires_grad], 'lr': lr},
+            ]
+        else:
+            muon_params = [
+                p for n, p in self.model.encoder.named_parameters()
+                if p.requires_grad and p.ndim == 2
+            ]
+            muon_ids = {id(p) for p in muon_params}
+
+            embedding_params = [
+                p for p in self.model.embedding.parameters() if p.requires_grad
+            ]
+            embedding_ids = {id(p) for p in embedding_params}
+
+            encoder_residual_params = [
+                p for p in self.model.encoder.parameters()
+                if p.requires_grad and id(p) not in muon_ids
+            ]
+            encoder_residual_ids = {id(p) for p in encoder_residual_params}
+
+            head_params = [
+                p for p in self.model.parameters()
+                if p.requires_grad
+                and id(p) not in muon_ids | embedding_ids | encoder_residual_ids
+            ]
+
+            self.muon_optimizer = Muon(
+                muon_params,
+                lr=lr * encoder_lr_factor,
+                weight_decay=self.training_config.weight_decay,
+                adjust_lr_fn='match_rms_adamw',
+            )
+            self.muon_scheduler = LambdaLR(
+                self.muon_optimizer,
+                wsd_schedule(
+                    warmup_steps=self.training_config.warmup_steps,
+                    max_steps=self.training_config.max_steps,
+                )
+            )
+            adamw_param_groups = [
+                {'params': embedding_params + encoder_residual_params, 'lr': lr * encoder_lr_factor},
+                {'params': head_params, 'lr': lr},
+            ]
+
+        self.adamw_optimizer = AdamW(
+            adamw_param_groups,
             weight_decay=self.training_config.weight_decay,
             betas=(0.9, 0.98),
-            eps=1e-7
+            eps=1e-7,
         )
         lr_schedule_fn = wsd_schedule(
             warmup_steps=self.training_config.warmup_steps,
-            max_steps=self.training_config.max_steps
+            max_steps=self.training_config.max_steps,
         )
-        self.scheduler = LambdaLR(self.optimizer, lr_schedule_fn)
+        self.adamw_scheduler = LambdaLR(self.adamw_optimizer, lr_schedule_fn)
+
+        del self.optimizer
+        del self.scheduler
 
     def _build_configs(self, config):
         self.training_config = PVTuningConfig(**config['training'])
@@ -645,10 +739,38 @@ class PVTuner(Trainer):
         self.model = ssl_to_pv_model(ssl_model)
         del ssl_model
 
-        for param in self.model.encoder.parameters():
-            param.requires_grad = False
-        for param in self.model.embedding.parameters():
-            param.requires_grad = False
+    def ckpt(self, step=None, training_state=True, additional_modules=None):
+        if training_state:
+            if self.muon_optimizer is not None:
+                torch.save(
+                    self.muon_optimizer.state_dict(),
+                    os.path.join(self.logdir, 'muon_optimizer.pth')
+                )
+                torch.save(
+                    self.muon_scheduler.state_dict(),
+                    os.path.join(self.logdir, 'muon_scheduler.pth')
+                )
+            torch.save(
+                self.adamw_optimizer.state_dict(),
+                os.path.join(self.logdir, 'adamw_optimizer.pth')
+            )
+            torch.save(
+                self.adamw_scheduler.state_dict(),
+                os.path.join(self.logdir, 'adamw_scheduler.pth')
+            )
+        super().ckpt(step=step, training_state=False, additional_modules=additional_modules)
+
+    def _optimizer_step(self):
+        if self.muon_optimizer is not None:
+            self.muon_optimizer.step()
+            self.muon_scheduler.step()
+        self.adamw_optimizer.step()
+        self.adamw_scheduler.step()
+
+    def _optimizer_zero_grad(self, set_to_none=True):
+        if self.muon_optimizer is not None:
+            self.muon_optimizer.zero_grad(set_to_none=set_to_none)
+        self.adamw_optimizer.zero_grad(set_to_none=set_to_none)
 
     def _load_datasets(self):
         dataset = Lc0PositionDataset(
@@ -669,7 +791,7 @@ class PVTuner(Trainer):
         self.model.train()
         self.model.to(self.device)
 
-        self.optimizer.zero_grad(set_to_none=True)
+        self._optimizer_zero_grad(set_to_none=True)
 
         gradient_accumulation_steps = self.training_config.gradient_accumulation_steps
 
@@ -728,11 +850,10 @@ class PVTuner(Trainer):
                     max_norm=self.training_config.max_grad_norm,
                 )
 
-                self.optimizer.step()
-                self.scheduler.step()
+                self._optimizer_step()
 
                 # tracking
-                self.logger.update('lr', self.scheduler.get_last_lr()[0])
+                self.logger.update('lr', self.adamw_scheduler.get_last_lr()[-1])
                 self.logger.update('policy_loss', acc_buffer.get_mean('policy_loss'))
                 self.logger.update('value_loss', acc_buffer.get_mean('value_loss', ignore_zeros=True))
                 self.logger.update('accuracy', acc_buffer.get_mean('accuracy'))
@@ -742,7 +863,7 @@ class PVTuner(Trainer):
                 acc_buffer.reset()
                 pbar.update(1)
 
-                self.optimizer.zero_grad(set_to_none=True)
+                self._optimizer_zero_grad(set_to_none=True)
 
                 step += 1
                 if step >= self.training_config.max_steps:

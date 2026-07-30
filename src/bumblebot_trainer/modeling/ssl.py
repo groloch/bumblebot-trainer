@@ -124,12 +124,12 @@ class PredictorEmbedding(nn.Module):
         self.hidden_size = config.hidden_size
         self.register_buffer('role_ids', torch.arange(SSLConstants.NUM_TOKENS_PER_MOVE))
 
-        self.dropout = 0.2
         self.mask_token_embed = nn.Parameter(torch.randn(config.hidden_size))
 
     def forward(
             self,
-            moves_ids: torch.Tensor) -> torch.Tensor:
+            moves_ids: torch.Tensor,
+            dropout: float = 0.0) -> torch.Tensor:
         B, N, _ = moves_ids.shape
 
         embeds = torch.stack([
@@ -141,8 +141,8 @@ class PredictorEmbedding(nn.Module):
             self.piecetype_embed(moves_ids[:, :, 5]),  # piece promoted
         ], dim=2)  # (B, N, 6, H)
 
-        if self.training and self.dropout > 0:
-            mask = torch.rand(B, N, 6, device=moves_ids.device) < self.dropout
+        if self.training and dropout > 0:
+            mask = torch.rand(B, N, 6, device=moves_ids.device) < dropout
             mask_token = self.mask_token_embed.view(1, 1, 1, self.hidden_size).expand(B, N, 6, self.hidden_size)
             embeds = torch.where(mask.unsqueeze(-1), mask_token, embeds)
 
@@ -184,11 +184,12 @@ class Predictor(nn.Module):
         x: torch.Tensor,
         moves_ids: torch.Tensor,
         moves_attention_mask: torch.Tensor,
+        dropout: float = 0.0,
     ) -> torch.Tensor:
         B, N, D = x.shape
 
         embedding = self.embed_embed(x)
-        moves_embeds = self.moves_embed(moves_ids)
+        moves_embeds = self.moves_embed(moves_ids, dropout)
 
         inputs_embeds = torch.cat([embedding, moves_embeds], dim=1)
 

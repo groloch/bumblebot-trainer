@@ -31,6 +31,12 @@ training:
   attacks_loss_weight: 0.1
   ssl_loss_weight: 1.0
   perceptive_loss_weight: 2.0
+  dropout_schedule:
+    min_dropout: 0.2
+    max_dropout: 1.0
+    convergence_rate: 0.1
+    f1_threshold: 0.8
+    min_steps_between_updates: 50
 data:
   min_moves: 30
   max_prediction_depth: 10

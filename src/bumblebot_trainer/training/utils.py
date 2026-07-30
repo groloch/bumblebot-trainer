@@ -8,7 +8,8 @@ import torch
 import numpy as np
 import mlflow
 
-from ..config import TrackingConfig, ModelConfig, EncoderConfig
+from ..config import TrackingConfig
+from ..config_loading import build_model_config as build_runtime_model_config
 
 
 def init_logdir(logdir: str, config_path: str) -> str:
@@ -41,13 +42,8 @@ def model_parameters(model: torch.nn.Module):
 
     return total_params, trainable_params
 
-def build_model_config(config: dict) -> ModelConfig:
-    hidden_size = config['hidden_size']
-    encoder_config = EncoderConfig(hidden_size=hidden_size, **config.pop('encoder'))
-    return ModelConfig(
-        encoder_config=encoder_config,
-        **config
-    )
+def build_model_config(config: dict):
+    return build_runtime_model_config(config)
 
 def wsd_schedule(warmup_steps: int, max_steps: int):
     def schedule_lr(current_step: int):
@@ -59,3 +55,11 @@ def wsd_schedule(warmup_steps: int, max_steps: int):
         progress = (current_step - decay_start) / (max_steps - decay_start)
         return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
     return schedule_lr
+
+def dropout_schedule(min_dropout: float, max_dropout: float, convergence_rate: float):
+    """Exponential convergence schedule for dropout rate
+    """
+    k = max_dropout - min_dropout
+    def _schedule(step: int) -> float:
+        return min_dropout + k * (1.0 - math.exp(-convergence_rate * step))
+    return _schedule

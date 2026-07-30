@@ -1,5 +1,13 @@
+from copy import deepcopy
+import yaml
+
 import numpy as np
 import chess
+
+
+from .config import ModelConfig, EncoderConfig, CFEncoderConfig
+
+
 
 
 class ChessConstants:
@@ -81,3 +89,47 @@ def get_move_from_id(index: int, turn: chess.Color) -> chess.Move:
         to_square = chess.square_mirror(to_square)
 
     return chess.Move(from_square, to_square, promotion=promotion)
+
+def normalize_config(config: dict) -> dict:
+    ENCODING_TO_INPUT_SIZE = {
+    'lc0': 112,
+    'simplified': 18,
+    }
+
+    config = deepcopy(config)
+
+    if 'training' in config:
+        # yaml doesn't always keep scientific notation values as desired in this codebase
+        config['training']['learning_rate'] = float(config['training']['learning_rate'])
+
+        encoding = config.get('data', {}).get('encoding')
+        if encoding in ENCODING_TO_INPUT_SIZE:
+            config['model']['input_size'] = ENCODING_TO_INPUT_SIZE[encoding]
+
+        if 'model' in config and 'encoder' in config['model']:
+            config['model']['intermediate_size'] = config['model']['encoder']['intermediate_size']
+
+    return config
+
+
+def load_config_file(config_path: str) -> dict:
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return normalize_config(config)
+
+
+def build_model_config(model_config_dict: dict) -> ModelConfig:
+    model_dict = deepcopy(model_config_dict)
+    hidden_size = model_dict['hidden_size']
+    encoder_name = model_dict['encoder_name']
+    encoder_kwargs = model_dict.pop('encoder')
+
+    if encoder_name == 'cf':
+        encoder_config = CFEncoderConfig(hidden_size=hidden_size, **encoder_kwargs)
+    else:
+        encoder_config = EncoderConfig(hidden_size=hidden_size, **encoder_kwargs)
+
+    return ModelConfig(
+        encoder_config=encoder_config,
+        **model_dict,
+    )

@@ -4,6 +4,7 @@ import numpy as np
 from torch.utils.data import Dataset
 import chess
 from datasets import load_dataset
+from huggingface_hub import HfFileSystem
 
 from .utils import process_item, get_game_phase, VariationNode
 
@@ -84,14 +85,24 @@ class Lc0PositionDataset(PositionDataset):
     def __init__(self, directory: str, encoding: str):
         super().__init__(encoding)
 
+        repo = 'Maxlegrec/test91-data'
+        hf_fs = HfFileSystem()
+        available_files = {
+            p.split('/')[-1]
+            for p in hf_fs.ls(f'datasets/{repo}', detail=False)
+        }
         data_files = [
-            f'training-run2-test91-20251118-{x}{y}17.parquet'
-            for x in range(2)
-            for y in range(10)
+            f for f in (
+                f'training-run2-test91-202511{d}-{x}{y}17.parquet'
+                for x in range(2)
+                for y in range(10)
+                for d in range(18, 22)
+            )
+            if f in available_files
         ]
 
         self.dataset = load_dataset(
-            'Maxlegrec/test91-data',
+            repo,
             split='train',
             data_files=data_files
         )
@@ -100,6 +111,9 @@ class Lc0PositionDataset(PositionDataset):
             lambda x: get_game_phase(chess.Board(x['fen'])) != 'opening',
             num_proc=16
         )
+        self.dataset = self.dataset.shuffle()
+        n_pos = int(25e6)
+        self.dataset = self.dataset.select(range(n_pos))
 
     def __len__(self):
         return len(self.dataset)
