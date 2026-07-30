@@ -41,6 +41,8 @@ class LichessStandardIterableDataset(IterablePositionDataset):
         self.min_elo = min_elo
 
         data_files = get_lichess_files_for_year(2025)
+        data_files += get_lichess_files_for_year(2024)
+        data_files += get_lichess_files_for_year(2023)
 
         self.dataset = load_dataset(
             'Lichess/standard-chess-games',
