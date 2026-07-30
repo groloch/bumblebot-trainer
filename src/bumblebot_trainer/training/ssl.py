@@ -12,7 +12,7 @@ from torch.optim.swa_utils import AveragedModel, get_ema_multi_avg_fn
 from . import Trainer
 from .utils import wsd_schedule, dropout_schedule
 from ..modeling import SSLChessModel, Predictor
-from ..data import LichessStandardGamesSSLDataset, SSLCollator, Lc0PositionDataset
+from ..data import LichessStandardIterableSSLDataset, SSLCollator, Lc0PositionDataset
 from ..tracking import AccumulationBuffer
 from ..tracking.metrics import (
     binary_f1_from_stats,
@@ -151,18 +151,19 @@ class SSLTrainer(Trainer):
             self._current_dropout = self._dropout_fn(self._n_dropout_updates)
 
     def _load_datasets(self):
-        dataset = LichessStandardGamesSSLDataset(
+        dataset = LichessStandardIterableSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
             encoding=self.data_config.encoding,
+            min_elo=0
         )
 
-        print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
+        # print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
 
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            shuffle=True,
+            # shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth)
@@ -192,11 +193,7 @@ class SSLTrainer(Trainer):
         self._steps_since_dropout_update = 0
 
         step = 0
-        total_steps = (len(self.train_dataloader)+gradient_accumulation_steps-1) // gradient_accumulation_steps
-        total_steps = min(
-            self.training_config.max_steps,
-            total_steps
-        )
+        total_steps = self.training_config.max_steps
         pbar = tqdm(total=total_steps, desc='SSL Training')
 
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
@@ -500,18 +497,19 @@ class LegalAttacksTrainer(Trainer):
         self.model = SSLChessModel(self.model_config)
 
     def _load_datasets(self):
-        dataset = LichessStandardGamesSSLDataset(
+        dataset = LichessStandardIterableSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
             encoding=self.data_config.encoding,
+            min_elo=0
         )
 
-        print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
+        # print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
 
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            shuffle=True,
+            # shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth),
@@ -526,11 +524,7 @@ class LegalAttacksTrainer(Trainer):
         gradient_accumulation_steps = self.training_config.gradient_accumulation_steps
 
         step = 0
-        total_steps = (len(self.train_dataloader)+gradient_accumulation_steps-1) // gradient_accumulation_steps
-        total_steps = min(
-            self.training_config.max_steps,
-            total_steps
-        )
+        total_steps = self.training_config.max_steps
         pbar = tqdm(total=total_steps, desc='No-SSL Training')
 
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
