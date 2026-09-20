@@ -169,7 +169,7 @@ class Predictor(nn.Module):
             num_attention_heads=config.num_heads,
             intermediate_size=config.intermediate_size,
             max_position_embeddings=ChessConstants.MAX_NUMBER_OF_MOVES + 64,
-            num_labels=None,
+            num_labels=1,
             pad_token_id=0,
             bos_token_id=0,
             eos_token_id=0,
