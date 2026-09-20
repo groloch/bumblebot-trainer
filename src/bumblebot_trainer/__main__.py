@@ -6,12 +6,14 @@ from .utils import load_config_file
 def main(config_path: str):
     config = load_config_file(config_path)
 
-    if config['type'] in ('pv', 'ssl', 'legal_attacks', 'pvtuner'):
-        from .training import build_trainer
-        trainer = build_trainer(config, config_path, config['type'])
+    if config['type'] != 'ssl':
+        raise ValueError(f"Unsupported training type: {config['type']}")
 
-        trainer.run()
-        trainer.wrapup()
+    from .training import SSLTrainer
+    trainer = SSLTrainer(config, config_path)
+
+    trainer.run()
+    trainer.wrapup()
 
 
 def export_main(logdir: str, output_path: str | None = None, checkpoint_path: str | None = None):

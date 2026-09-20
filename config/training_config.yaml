@@ -1,30 +1,47 @@
-type: "train"
-model: 
+type: "ssl"
+model:
   hidden_size: 1024
-  encoder_name: 'bert'
+  encoder_name: "cf"
   encoder:
     num_layers: 12
     intermediate_size: 1536
     num_heads: 32
+    compressed_dim: 32
+    smolgen_dim: 256
+    gen_dim: 256
+predictor:
+  num_layers: 4
+  intermediate_size: 1024
+  num_heads: 16
 training:
-  max_steps: 100000
-  batch_size: 512
+  max_steps: 10000
+  batch_size: 256
   learning_rate: 3e-4
   warmup_steps: 1000
-  weight_decay: 0.01
+  weight_decay: 0.00001
   max_grad_norm: 2.0
   seed: 34657
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 4
   num_workers: 8
-  forecast_loss_weight: 1
   logdir: "logs"
-  save_every: 5000
-  name: "bumblebot"
+  save_every: 1000
+  ema_decay: 0.99
+  name: "bumblebot-ssl"
+  legal_loss_weight: 0.5
+  attacks_loss_weight: 0.1
+  ssl_loss_weight: 1.0
+  perceptive_loss_weight: 2.0
+  dropout_schedule:
+    min_dropout: 0.4
+    max_dropout: 0.4
+    convergence_rate: 0.1
+    f1_threshold: 0.8
+    min_steps_between_updates: 50
 data:
+  min_moves: 30
+  max_prediction_depth: 10
   encoding: 'simplified'
-  datasets:
-    - 
 tracking:
-  experiment_name: "ForecastEngine"
-  tracking_uri: "file:./mlruns"
+  experiment_name: "ForecastEngine-SSL"
+  tracking_uri: "sqlite:///mlruns.db"
   use_mlflow: true
