@@ -18,13 +18,18 @@ from .utils import (
     dropout_schedule,
 )
 from ..modeling import SSLChessModel, Predictor
-from ..data import LichessStandardIterableSSLDataset, SSLCollator
+from ..data import (
+    LichessStandardIterableSSLDataset,
+    LichessStandardGamesSSLDataset,
+    SSLCollator
+)
 from ..tracking import AccumulationBuffer, MetricLogger
 from ..tracking.metrics import (
-    binary_f1_from_stats,
-    binary_f1_stats,
-    multiclass_confusion_matrix,
-    multiclass_f1_from_confusion_matrix,
+    accuracy_from_stats,
+    accuracy_stats,
+    topk_accuracy_stats,
+    mae_from_stats,
+    mae_stats,
 )
 from ..config import (
     TrainingConfig,
@@ -180,21 +185,26 @@ class SSLTrainer:
         for p in self.teacher.parameters():
             p.requires_grad = False
 
-    def _update_dropout(self, perceptive_legal_f1: float):
+    def _update_dropout(self, perceptive_policy_accuracy: float):
         ds = self.training_config.dropout_schedule
         self._steps_since_dropout_update += 1
-        if (perceptive_legal_f1 >= ds.f1_threshold
+        if (perceptive_policy_accuracy >= ds.policy_accuracy_threshold
                 and self._steps_since_dropout_update >= ds.min_steps_between_updates):
             self._n_dropout_updates += 1
             self._steps_since_dropout_update = 0
             self._current_dropout = self._dropout_fn(self._n_dropout_updates)
 
     def _load_datasets(self):
-        dataset = LichessStandardIterableSSLDataset(
+        # dataset = LichessStandardIterableSSLDataset(
+        #     min_moves=self.data_config.min_moves,
+        #     max_prediction_depth=self.data_config.max_prediction_depth,
+        #     encoding=self.data_config.encoding,
+        #     min_elo=0
+        # )
+        dataset = LichessStandardGamesSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
             encoding=self.data_config.encoding,
-            min_elo=0
         )
 
         # print(f'{dataset.__class__.__name__} size: {len(dataset):,}')
@@ -211,12 +221,15 @@ class SSLTrainer:
     def run(self):
         self.model.train()
         self.model.to(self.device)
+        torch.compile(self.model, mode='max-autotune')
 
         self.predictor.train()
         self.predictor.to(self.device)
+        torch.compile(self.predictor, mode='max-autotune')
 
         self.teacher.eval()
         self.teacher.to(self.device)
+        torch.compile(self.teacher, mode='max-autotune')
 
         self._optimizer_zero_grad(set_to_none=True)
 
@@ -236,26 +249,28 @@ class SSLTrainer:
         pbar = tqdm(total=total_steps, desc='SSL Training')
 
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
-        attacks_num_classes = self.model.attacks_head.output_dim
-        legal_f1_stats = torch.zeros(3, device=self.device)
-        attacks_confusion = torch.zeros((attacks_num_classes, attacks_num_classes), device=self.device)
-        perceptive_legal_f1_stats = torch.zeros(3, device=self.device)
-        perceptive_attacks_confusion = torch.zeros(
-            (attacks_num_classes, attacks_num_classes),
-            device=self.device
-        )
+        policy_stats = torch.zeros(2, device=self.device)
+        policy_top3_stats = torch.zeros(2, device=self.device)
+        value_error_stats = torch.zeros(2, device=self.device)
+        perceptive_policy_stats = torch.zeros(2, device=self.device)
+        perceptive_policy_top3_stats = torch.zeros(2, device=self.device)
+        perceptive_value_error_stats = torch.zeros(2, device=self.device)
+
+        tokens: torch.Tensor
+        tokens_: torch.Tensor
+        targets: dict[str, torch.Tensor]
+        moves: torch.Tensor
+        moves_attention_mask: torch.Tensor
 
         for partial_step, batch in enumerate(self.train_dataloader):
-            tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, moves, moves_attention_mask = batch
+            tokens, tokens_, targets, moves, moves_attention_mask = batch
 
             tokens = tokens.to(self.device, non_blocking=True)
             tokens_ = tokens_.to(self.device, non_blocking=True)
 
-            legal_moves = legal_moves.to(self.device, dtype=torch.float32, non_blocking=True)
-            attacks = attacks.to(self.device, dtype=torch.long, non_blocking=True)
-
-            legal_moves_ = legal_moves_.to(self.device, dtype=torch.float32, non_blocking=True)
-            attacks_ = attacks_.to(self.device, dtype=torch.long, non_blocking=True)
+            targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
+            target = {'policy': targets['policy'], 'value': targets['value']}
+            target_ = {'policy': targets['policy_'], 'value': targets['value_']}
 
             moves = moves.to(self.device, non_blocking=True)
             moves_attention_mask = moves_attention_mask.to(self.device, non_blocking=True)
@@ -267,7 +282,7 @@ class SSLTrainer:
 
                 student_embed, logits, losses = self.model(
                     tokens,
-                    target={'legal': legal_moves, 'attacks': attacks}
+                    target=target
                 )
                 pred_raw, pred_norm = self.predictor(
                     student_embed,
@@ -276,34 +291,31 @@ class SSLTrainer:
                     self._current_dropout
                 )
 
-                legal_logits = logits['legal']
-                legal_loss = losses['legal']
-
-                attacks_logits = logits['attacks']
-                attacks_loss = losses['attacks']
-
                 ssl_loss = F.smooth_l1_loss(pred_norm, target_embed.detach(), beta=0.1)
 
                 perceptive_logits, perceptive_losses = self.teacher.module.heads_out(
                     pred_raw,
-                    target={'legal': legal_moves_, 'attacks': attacks_}
+                    target=target_
                 )
 
-                perceptive_legal_loss = perceptive_losses['legal']
-                perceptive_legal_logits = perceptive_logits['legal']
+                policy_loss = losses['policy']
+                value_loss = losses['value']
 
-                perceptive_attacks_loss = perceptive_losses['attacks']
-                perceptive_attacks_logits = perceptive_logits['attacks']
+                perceptive_policy_loss = perceptive_losses['policy']
+                perceptive_policy_logits = perceptive_logits['policy']
+
+                perceptive_value_loss = perceptive_losses['value']
+                perceptive_value_logits = perceptive_logits['value']
 
                 total_loss = ssl_loss / gradient_accumulation_steps * self.training_config.ssl_loss_weight
 
-                total_loss += legal_loss / gradient_accumulation_steps * self.training_config.legal_loss_weight
-                total_loss += attacks_loss / gradient_accumulation_steps * self.training_config.attacks_loss_weight
+                total_loss += policy_loss / gradient_accumulation_steps * self.training_config.policy_loss_weight
+                total_loss += value_loss / gradient_accumulation_steps * self.training_config.value_loss_weight
 
-                total_loss += perceptive_legal_loss / gradient_accumulation_steps * \
-                    self.training_config.legal_loss_weight * self.training_config.perceptive_loss_weight
-                total_loss += perceptive_attacks_loss / gradient_accumulation_steps * \
-                    self.training_config.attacks_loss_weight * self.training_config.perceptive_loss_weight
+                total_loss += perceptive_policy_loss / gradient_accumulation_steps * \
+                    self.training_config.policy_loss_weight * self.training_config.perceptive_loss_weight
+                total_loss += perceptive_value_loss / gradient_accumulation_steps * \
+                    self.training_config.value_loss_weight * self.training_config.perceptive_loss_weight
 
             total_loss.backward()
 
@@ -317,49 +329,53 @@ class SSLTrainer:
                 partial_step
             )
 
-            acc_buffer.update('legal_loss_unscaled', legal_loss.detach(), partial_step)
+            acc_buffer.update('policy_loss_unscaled', policy_loss.detach(), partial_step)
             acc_buffer.update(
-                'legal_loss',
-                legal_loss.detach() * self.training_config.legal_loss_weight,
+                'policy_loss',
+                policy_loss.detach() * self.training_config.policy_loss_weight,
                 partial_step
             )
-            legal_f1_stats += binary_f1_stats(legal_logits.detach(), legal_moves)
+            policy_stats += accuracy_stats(logits['policy'].detach(), target['policy'])
+            policy_top3_stats += topk_accuracy_stats(logits['policy'].detach(), target['policy'])
 
-            acc_buffer.update('attacks_loss_unscaled', attacks_loss.detach(), partial_step)
+            acc_buffer.update('value_loss_unscaled', value_loss.detach(), partial_step)
             acc_buffer.update(
-                'attacks_loss',
-                attacks_loss.detach() * self.training_config.attacks_loss_weight,
+                'value_loss',
+                value_loss.detach() * self.training_config.value_loss_weight,
                 partial_step
             )
-            attacks_confusion += multiclass_confusion_matrix(attacks_logits.detach(), attacks)
-
-            acc_buffer.update(
-                'perceptive_legal_loss_unscaled', perceptive_legal_loss.detach(),
-                partial_step
-            )
-            acc_buffer.update(
-                'perceptive_legal_loss', perceptive_legal_loss.detach() * \
-                    self.training_config.legal_loss_weight * self.training_config.perceptive_loss_weight,
-                partial_step
-            )
-            perceptive_legal_f1_stats += binary_f1_stats(
-                perceptive_legal_logits.detach(),
-                legal_moves_
-            )
+            value_error_stats += mae_stats(torch.sigmoid(logits['value'].detach()), target['value'])
 
             acc_buffer.update(
-                'perceptive_attacks_loss_unscaled', perceptive_attacks_loss.detach(),
+                'perceptive_policy_loss_unscaled', perceptive_policy_loss.detach(),
                 partial_step
             )
             acc_buffer.update(
-                'perceptive_attacks_loss',
-                perceptive_attacks_loss.detach() * self.training_config.attacks_loss_weight * \
-                    self.training_config.perceptive_loss_weight,
+                'perceptive_policy_loss', perceptive_policy_loss.detach() * \
+                    self.training_config.policy_loss_weight * self.training_config.perceptive_loss_weight,
                 partial_step
             )
-            perceptive_attacks_confusion += multiclass_confusion_matrix(
-                perceptive_attacks_logits.detach(),
-                attacks_
+            perceptive_policy_stats += accuracy_stats(
+                perceptive_policy_logits.detach(),
+                target_['policy']
+            )
+            perceptive_policy_top3_stats += topk_accuracy_stats(
+                perceptive_policy_logits.detach(),
+                target_['policy']
+            )
+
+            acc_buffer.update(
+                'perceptive_value_loss_unscaled', perceptive_value_loss.detach(),
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_value_loss', perceptive_value_loss.detach() * \
+                    self.training_config.value_loss_weight * self.training_config.perceptive_loss_weight,
+                partial_step
+            )
+            perceptive_value_error_stats += mae_stats(
+                torch.sigmoid(perceptive_value_logits.detach()),
+                target_['value']
             )
             # \ metrics
 
@@ -380,44 +396,48 @@ class SSLTrainer:
                 self.logger.update('ssl_loss_unscaled', acc_buffer.get_mean('ssl_loss_unscaled'))
                 self.logger.update('ssl_loss', acc_buffer.get_mean('ssl_loss'))
 
-                self.logger.update('legal_loss_unscaled', acc_buffer.get_mean('legal_loss_unscaled'))
-                self.logger.update('legal_loss', acc_buffer.get_mean('legal_loss'))
-                self.logger.update('legal_f1', binary_f1_from_stats(legal_f1_stats).item())
+                self.logger.update('policy_loss_unscaled', acc_buffer.get_mean('policy_loss_unscaled'))
+                self.logger.update('policy_loss', acc_buffer.get_mean('policy_loss'))
+                self.logger.update('policy_accuracy', accuracy_from_stats(policy_stats).item())
+                self.logger.update('policy_top3_accuracy', accuracy_from_stats(policy_top3_stats).item())
 
-                self.logger.update('attacks_loss_unscaled', acc_buffer.get_mean('attacks_loss_unscaled'))
-                self.logger.update('attacks_loss', acc_buffer.get_mean('attacks_loss'))
+                self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
+                self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
+                self.logger.update('value_mae', mae_from_stats(value_error_stats).item())
+
                 self.logger.update(
-                    'attacks_f1',
-                    multiclass_f1_from_confusion_matrix(attacks_confusion).item()
+                    'perceptive_policy_loss_unscaled',
+                    acc_buffer.get_mean('perceptive_policy_loss_unscaled')
+                )
+                self.logger.update('perceptive_policy_loss', acc_buffer.get_mean('perceptive_policy_loss'))
+
+                _perceptive_policy_accuracy = accuracy_from_stats(perceptive_policy_stats).item()
+                self.logger.update('perceptive_policy_accuracy', _perceptive_policy_accuracy)
+                self.logger.update(
+                    'perceptive_policy_top3_accuracy',
+                    accuracy_from_stats(perceptive_policy_top3_stats).item()
                 )
 
+                self._update_dropout(_perceptive_policy_accuracy)
+
                 self.logger.update(
-                    'perceptive_legal_loss_unscaled',
-                    acc_buffer.get_mean('perceptive_legal_loss_unscaled')
+                    'perceptive_value_loss_unscaled',
+                    acc_buffer.get_mean('perceptive_value_loss_unscaled')
                 )
-                self.logger.update('perceptive_legal_loss', acc_buffer.get_mean('perceptive_legal_loss'))
-
-                _perceptive_legal_f1 = binary_f1_from_stats(perceptive_legal_f1_stats).item()
-                self.logger.update('perceptive_legal_f1', _perceptive_legal_f1)
-
-                self._update_dropout(_perceptive_legal_f1)
-
+                self.logger.update('perceptive_value_loss', acc_buffer.get_mean('perceptive_value_loss'))
                 self.logger.update(
-                    'perceptive_attacks_loss_unscaled',
-                    acc_buffer.get_mean('perceptive_attacks_loss_unscaled')
-                )
-                self.logger.update('perceptive_attacks_loss', acc_buffer.get_mean('perceptive_attacks_loss'))
-                self.logger.update(
-                    'perceptive_attacks_f1',
-                    multiclass_f1_from_confusion_matrix(perceptive_attacks_confusion).item()
+                    'perceptive_value_mae',
+                    mae_from_stats(perceptive_value_error_stats).item()
                 )
                 # \ tracking
 
                 acc_buffer.reset()
-                legal_f1_stats.zero_()
-                attacks_confusion.zero_()
-                perceptive_legal_f1_stats.zero_()
-                perceptive_attacks_confusion.zero_()
+                policy_stats.zero_()
+                policy_top3_stats.zero_()
+                value_error_stats.zero_()
+                perceptive_policy_stats.zero_()
+                perceptive_policy_top3_stats.zero_()
+                perceptive_value_error_stats.zero_()
                 pbar.update(1)
 
                 self._optimizer_zero_grad(set_to_none=True)
@@ -432,7 +452,8 @@ class SSLTrainer:
                             self.logger.log(step, exclude_if_contains=[
                                 'unscaled',
                                 'perceptive',
-                                'attacks'
+                                'top3',
+                                'loss'
                             ])
                         }'
                     )

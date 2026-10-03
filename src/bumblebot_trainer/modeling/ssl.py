@@ -6,19 +6,18 @@ from transformers import BertModel, BertConfig
 
 from .embedding import Embedding
 from .encoders import Encoder, EncoderOutput, build_encoder
-from .heads import PolicyHead, PolicyOutput, SquareHead, HeadOutput
+from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
 from ..data.ssl.utils import SSLConstants
 
 
 class SSLChessModel(nn.Module):
-    """Chess model for JEPA-like training with modulable square-level training objectives.
-    This model has two square-level training objectives: predicting the legal moves and the
-    relative attack map.
-    Legal moves is a lc0-style attention policy head.
-    Relative attack map is a square-level classification head that predicts the relative control of
-    each square (our attackers - their attackers).
+    """Chess model for JEPA-like training with modulable training objectives.
+    This model has two training objectives: predicting the policy (move distribution) and
+    the position value.
+    Policy is a lc0-style attention policy head.
+    Value is a simple MLP regression head over the global (mean) embedding.
     """
     def __init__(self, config: SSLModelConfig):
         super().__init__()
@@ -33,15 +32,13 @@ class SSLChessModel(nn.Module):
             config.encoder_name,
             config=config.encoder_config
         )
-        self.legalmoves_head = PolicyHead(
+        self.policy_head = PolicyHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([10]))
-        )
-
-        self.attacks_head = SquareHead(
-            hidden_size=config.hidden_size,
-            output_dim=ChessConstants.RELEVANT_ATTACKERS * 2 + 1,
             loss_fn=nn.CrossEntropyLoss()
+        )
+        self.value_head = ValueHead(
+            hidden_size=config.hidden_size,
+            loss_fn=nn.SmoothL1Loss()
         )
 
     def forward(
@@ -82,16 +79,16 @@ class SSLChessModel(nn.Module):
 
         Args:
             x (torch.Tensor): input embeddings of shape (B, 64, hidden_size)
-            targets (dict[str, torch.Tensor]): legal moves and attacks targets
+            target (dict[str, torch.Tensor]): policy and value targets
 
         Returns:
-            dict[str, torch.Tensor]: logits for legal moves and attacks
-            dict[str, torch.Tensor]: losses for legal moves and attacks
+            dict[str, torch.Tensor]: logits for policy and value
+            dict[str, torch.Tensor]: losses for policy and value
         """
-        legal_out: PolicyOutput = self.legalmoves_head(x, target['legal'])
-        attacks_out: HeadOutput = self.attacks_head(x, target['attacks'])
-        logits = {'legal': legal_out.logits, 'attacks': attacks_out.logits}
-        losses = {'legal': legal_out.loss, 'attacks': attacks_out.loss}
+        policy_out: PolicyOutput = self.policy_head(x, target['policy'])
+        value_out: ValueOutput = self.value_head(x.mean(dim=1), target['value'])
+        logits = {'policy': policy_out.logits, 'value': value_out.logits}
+        losses = {'policy': policy_out.loss, 'value': value_out.loss}
         return logits, losses
 
 

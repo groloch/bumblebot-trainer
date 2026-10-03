@@ -4,7 +4,7 @@ import numpy as np
 from ..game_datasets import LichessStandardGamesDataset
 from ..iterable_datasets import LichessStandardIterableDataset
 from .utils import encode_both_boards
-from ..utils import san_to_uci
+from ..utils import san_to_uci, parse_result
 
 
 def sample_ssl_future_indices(game_length: int, max_prediction_depth: int) -> tuple[int, int]:
@@ -19,8 +19,8 @@ def sample_ssl_future_indices(game_length: int, max_prediction_depth: int) -> tu
 
 class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
     """Dataset used for the SSL pipeline. It provides board encoding (now and future),
-    the move sequence between the two boards, and the square level targets: legal moves and
-    attack maps for both boards.
+    the move sequence between the two boards, and the training targets for both boards:
+    policy (next-move distribution) and value (TD-smoothed expected result).
     """
     def __init__(self, min_moves: int, max_prediction_depth: int, encoding: str):
         super().__init__(min_moves, encoding)
@@ -28,20 +28,21 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth, num_proc=16
         )
-        self.len  = len(self.dataset)
+        self.len = len(self.dataset)
 
         self.max_prediction_depth = max_prediction_depth
 
     def __getitem__(self, idx):
-        game_length = self.dataset[idx]['game_length']
+        game = self.dataset[idx]
+        game_length = game['game_length']
 
         move_idx, target_idx = sample_ssl_future_indices(
             game_length=game_length,
             max_prediction_depth=self.max_prediction_depth,
         )
 
-        game = self.dataset[idx]
         movelist = game['moves']
+        result = game['result']
         board = chess.Board(chess960=True)
 
         for k in range(self.min_moves+move_idx):
@@ -53,14 +54,15 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
             min_moves=self.min_moves,
             move_idx=move_idx,
             target_idx=target_idx,
-            movelist=movelist
+            movelist=movelist,
+            result=result
         )
 
 
 class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
     """Iterable dataset used for the SSL pipeline. It provides board encoding (now and future),
-    the move sequence between the two boards, and the square level targets: legal moves and
-    attack maps for both boards.
+    the move sequence between the two boards, and the training targets for both boards:
+    policy (next-move distribution) and value (TD-smoothed expected result).
     This dataset streams the dataset to filter out low-elo games without caching the entire
     dataset in memory.
     """
@@ -95,5 +97,6 @@ class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
                 min_moves=self.min_moves,
                 move_idx=move_idx,
                 target_idx=target_idx,
-                movelist=moves
+                movelist=moves,
+                result=parse_result(item['Result'])
             )

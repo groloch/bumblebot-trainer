@@ -6,7 +6,7 @@ class DropoutScheduleConfig:
     min_dropout: float
     max_dropout: float
     convergence_rate: float
-    f1_threshold: float
+    policy_accuracy_threshold: float
     min_steps_between_updates: int
 
 
@@ -25,8 +25,8 @@ class TrainingConfig:
     save_every: int
     ema_decay: float
     name: str
-    legal_loss_weight: float
-    attacks_loss_weight: float
+    policy_loss_weight: float
+    value_loss_weight: float
     ssl_loss_weight: float
     perceptive_loss_weight: float
     dropout_schedule: DropoutScheduleConfig

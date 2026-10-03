@@ -71,3 +71,53 @@ def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
         total = targets.numel()
         accuracy = correct / total
     return accuracy.item()
+
+
+@torch.no_grad()
+def accuracy_stats(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Top-1 accuracy statistics for soft (probability) or hard targets.
+    Returns a [correct, total] tensor that can be accumulated across steps.
+    """
+    predictions = logits.argmax(dim=-1)
+    targets = targets.argmax(dim=-1)
+    correct = (predictions == targets).sum()
+    total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
+    return torch.stack([correct, total])
+
+
+@torch.no_grad()
+def topk_accuracy_stats(
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        k: int = 3) -> torch.Tensor:
+    """Top-k accuracy statistics for soft (probability) or hard targets.
+    Returns a [correct, total] tensor that can be accumulated across steps.
+    """
+    targets = targets.argmax(dim=-1, keepdim=True)
+    correct = (logits.topk(k, dim=-1).indices == targets).any(dim=-1).sum()
+    total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
+    return torch.stack([correct, total])
+
+
+@torch.no_grad()
+def accuracy_from_stats(stats: torch.Tensor) -> torch.Tensor:
+    correct, total = stats.unbind()
+    total = total.clamp(min=1)
+    return correct.float() / total.float()
+
+
+@torch.no_grad()
+def mae_stats(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    """Mean absolute error statistics. Returns an [error_sum, count] tensor
+    that can be accumulated across steps.
+    """
+    error = (predictions - targets).abs().sum()
+    count = torch.tensor(targets.numel(), device=targets.device, dtype=torch.long)
+    return torch.stack([error, count])
+
+
+@torch.no_grad()
+def mae_from_stats(stats: torch.Tensor) -> torch.Tensor:
+    error, count = stats.unbind()
+    count = count.clamp(min=1)
+    return error.float() / count.float()

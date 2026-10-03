@@ -5,7 +5,7 @@ import chess, chess.pgn
 from datasets import load_dataset, VerificationMode
 
 from .position_datasets import PositionDataset
-from .utils import san_to_uci, process_item, VariationNode
+from .utils import san_to_uci, process_item, VariationNode, parse_result
 
 
 class GamePositionDataset(PositionDataset):
@@ -62,7 +62,8 @@ class LichessStandardGamesDataset(GamePositionDataset):
         ).map(
             lambda x: {
                 'moves': x['moves'],
-                'game_length': len(x['moves'])-min_moves
+                'game_length': len(x['moves'])-min_moves,
+                'result': parse_result(x['Result'])
             },
             num_proc=16
         ).filter(

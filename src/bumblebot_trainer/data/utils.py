@@ -6,8 +6,8 @@ import torch
 import chess
 
 from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
-from typing import Literal, Optional
 
+from typing import Literal, Optional
 
 
 @dataclass
@@ -110,6 +110,30 @@ def encode_board(
         tokens[:, 16] = board.halfmove_clock / 100.0
         if board.ep_square is not None:
             tokens[board.ep_square, 17] = 1.0
+        return tokens
+
+    if encoding_type == 'legal':
+        tokens = torch.zeros((64, 18+64), dtype=torch.float32)
+        for square in chess.SQUARES:
+            piece = board.piece_at(square)
+            if piece is not None:
+                piece_type = piece.piece_type - 1
+                color_offset = 0 if piece.color == chess.WHITE else 6
+                tokens[square, piece_type + color_offset] = 1.0
+        if board.has_kingside_castling_rights(chess.WHITE):
+            tokens[:, 12] = 1.0
+        if board.has_queenside_castling_rights(chess.WHITE):
+            tokens[:, 13] = 1.0
+        if board.has_kingside_castling_rights(chess.BLACK):
+            tokens[:, 14] = 1.0
+        if board.has_queenside_castling_rights(chess.BLACK):
+            tokens[:, 15] = 1.0
+        tokens[:, 16] = board.halfmove_clock / 100.0
+        if board.ep_square is not None:
+            tokens[board.ep_square, 17] = 1.0
+
+        for move in board.legal_moves:
+            tokens[move.from_square, 18+move.to_square] = 1
         return tokens
 
     raise ValueError(f"Unknown encoding type: {encoding_type}")
@@ -260,3 +284,31 @@ def get_game_phase(board: chess.Board) -> str:
         return 'middlegame'
 
     return 'opening'
+
+def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']):
+    """Parses a string result into a integer result.
+    In case of: return value
+    White wins: 1
+    Draw: 0
+    Black wins: -1
+
+    Args:
+        result_str (str): a string representing a chess game result in san notation 
+
+    Raises:
+        ValueError: if the result is not parsable because of wrong format
+
+    Returns:
+        int: parsed result (1, 0, or -1)
+    """
+    match(result_str):
+        case '1-0':
+            return 1
+        case '1/2-1/2':
+            return 0
+        case '0-1':
+            return -1
+        case '*':
+            return 0
+        case _:
+            raise ValueError(f'Unable to parse chess game result {result_str}')

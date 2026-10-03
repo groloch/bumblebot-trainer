@@ -1,8 +1,10 @@
 import torch
 import chess
 
-from ..utils import encode_board, get_move_id
+from ..utils import encode_board, VariationNode, process_item
 from ...utils import ChessConstants
+
+from typing import Literal
 
 
 class SSLConstants:
@@ -17,16 +19,14 @@ class SSLCollator:
         self.max_lookahead = max_lookahead
 
     def __call__(self, batch):
-        tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, moves_list, lengths = zip(*batch)
+        tokens, tokens_, moves_list, lengths, targets = zip(*batch)
 
         tokens = torch.stack(tokens)
         tokens_ = torch.stack(tokens_)
 
-        legal_moves = torch.stack(legal_moves)
-        attacks = torch.stack(attacks)
-
-        legal_moves_ = torch.stack(legal_moves_)
-        attacks_ = torch.stack(attacks_)
+        targets = {
+            k: torch.stack([t[k] for t in targets]) for k in targets[0]
+        }
 
         batch_size = len(batch)
         max_len = 1 + self.max_lookahead
@@ -47,7 +47,7 @@ class SSLCollator:
             1, 1, SSLConstants.NUM_TOKENS_PER_MOVE
         ).view(batch_size, -1)
 
-        return tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, moves, moves_attention_mask
+        return tokens, tokens_, targets, moves, moves_attention_mask
 
 
 def encode_move_for_predictor(
@@ -88,20 +88,44 @@ def encode_move_for_predictor(
     )
     return move_encoded
 
-def get_relative_attack_map(board: chess.Board):
-    """Relative attack map: number of attackers (control) we have
-    over a square minus number of attackers they have.
-    """
-    if board.turn == chess.BLACK:
-        board = board.mirror()
+def apply_td_value(
+        color,
+        advancement,
+        result,
+        smoothing: Literal['linear', 'quadratic', 'cubic'] = 'quadratic'):
+    """Temporal difference formula applied to the game result to get the intermediate
+    expected result at some move.
+    It is a smoothing from draw expected (startpos) to the actual result of the game
+    based on the advancement.
 
-    attack_map = torch.zeros(64)
-    for square in chess.SQUARES:
-        attack_map[square] += len(board.attackers(chess.WHITE, square))
-        attack_map[square] -= len(board.attackers(chess.BLACK, square))
-    attack_map.clamp_(-ChessConstants.RELEVANT_ATTACKERS, ChessConstants.RELEVANT_ATTACKERS)
-    attack_map += ChessConstants.RELEVANT_ATTACKERS
-    return attack_map.long()
+    Args:
+        color (bool): current side to play
+        advancement (float): current advancement of the game (moves played / total number of moves)
+        result (int): result of the game (1: white wins, 0: draw, -1: black wins)
+        smoothing (str): smoothing to apply
+
+    Returns:
+        float: expected result from the side to move perspective, in [0, 1]
+    """
+    prob = (result + 1) / 2
+
+    def scale_a(a):
+        match smoothing:
+            case 'linear':
+                return a
+            case 'quadratic':
+                return a ** 2
+            case 'cubic':
+                return a ** 3
+    advancement_scaled = scale_a(advancement)
+
+    value = 0.5 * (1 - advancement_scaled) + prob * advancement_scaled
+
+    # process_item expects targets from the side-to-move perspective
+    if color == chess.BLACK:
+        value = 1.0 - value
+
+    return value
 
 def encode_both_boards(
         board: chess.Board,
@@ -109,46 +133,79 @@ def encode_both_boards(
         min_moves: int,
         move_idx: int,
         target_idx: int,
-        movelist: list[str]
+        movelist: list[str],
+        result: int
     ):
-    legal_moves = torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.bool)
-    for move in board.legal_moves:
-        legal_moves[get_move_id(move, board.turn)] = True
+    """Encodes two chess boards from a single game for ssl training
 
-    tokens = encode_board(board, encoding)
-    attacks = get_relative_attack_map(board)
+    Args:
+        board (chess.Board): the current board
+        encoding (str): the encoding to apply
+        min_moves (int): the minimum moves of games kept (offset)
+        move_idx (int): current move idx
+        target_idx (int): index of the last move to play to get the future board
+        movelist (list[str]): list of moves in the game
+        result (int): result of the game
+
+    Returns:
+        tuple: current board tokens, future board tokens, the predictor move sequence,
+        its length, and a target dict with `policy`/`value` (current board) and
+        `policy_`/`value_` (future board).
+    """
+    advancement = (min_moves + move_idx) / len(movelist)
+    node = VariationNode(
+        movelist[min_moves + move_idx],
+        expected_result=apply_td_value(board.turn, advancement, result)
+    )
+    tokens, targets = process_item(board, [node], encoding)
+
     movelist_ = torch.zeros((target_idx - move_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
-
-    _board = board.copy()
+    board_ = board.copy()
     for k in range(min_moves+move_idx, min_moves+target_idx):
         move = chess.Move.from_uci(movelist[k])
 
-        moved_piece_type = _board.piece_at(move.from_square).piece_type
+        moved_piece_type = board_.piece_at(move.from_square).piece_type
 
-        if _board.piece_at(move.to_square) is None:
-            if move.to_square == _board.ep_square and moved_piece_type == chess.PAWN:
+        if board_.piece_at(move.to_square) is None:
+            if move.to_square == board_.ep_square and moved_piece_type == chess.PAWN:
                 taken_piece_type = chess.PAWN
             else:
                 taken_piece_type = None
         else:
-            if _board.piece_at(move.to_square).color == _board.turn:
+            if board_.piece_at(move.to_square).color == board_.turn:
                 taken_piece_type = None
             else:
-                taken_piece_type = _board.piece_at(move.to_square).piece_type
+                taken_piece_type = board_.piece_at(move.to_square).piece_type
 
         movelist_[k - (min_moves+move_idx), :] = encode_move_for_predictor(
             move=move,
             piece_type=moved_piece_type,
             taken_piece_type=taken_piece_type,
-            turn=_board.turn,
+            turn=board_.turn,
             perspective=board.turn
         )
-        _board.push(move)
+        board_.push(move)
 
-    tokens_ = encode_board(_board, encoding)
-    attacks_ = get_relative_attack_map(_board)
-    legal_moves_ = torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.bool)
-    for move in _board.legal_moves:
-        legal_moves_[get_move_id(move, _board.turn)] = True
+    advancement_ = (min_moves + target_idx) / len(movelist)
+    future_value = apply_td_value(board_.turn, advancement_, result)
 
-    return tokens, tokens_, legal_moves, attacks, legal_moves_, attacks_, movelist_, target_idx - move_idx
+    if min_moves + target_idx < len(movelist):
+        node_ = VariationNode(
+            movelist[min_moves + target_idx],
+            expected_result=future_value
+        )
+        tokens_, targets_ = process_item(board_, [node_], encoding)
+    else:
+        # the future position is terminal: no next move to predict, the policy
+        # target is left empty (all zeros) and thus contributes no policy loss
+        tokens_ = encode_board(board_, encoding)
+        targets_ = {
+            'policy': torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.float),
+            'value': torch.tensor(future_value, dtype=torch.float)
+        }
+
+    target_dict = targets
+    target_dict['policy_'] = targets_['policy']
+    target_dict['value_'] = targets_['value']
+
+    return tokens, tokens_, movelist_, target_idx - move_idx, target_dict

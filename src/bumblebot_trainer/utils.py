@@ -90,8 +90,9 @@ def get_move_from_id(index: int, turn: chess.Color) -> chess.Move:
 
 def normalize_config(config: dict) -> dict:
     ENCODING_TO_INPUT_SIZE = {
-    'lc0': 112,
-    'simplified': 18,
+        'lc0': 112,
+        'simplified': 18,
+        'legal': 18+64
     }
 
     config = deepcopy(config)
