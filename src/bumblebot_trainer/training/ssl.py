@@ -21,6 +21,8 @@ from ..modeling import SSLChessModel, Predictor
 from ..data import (
     LichessStandardIterableSSLDataset,
     LichessStandardGamesSSLDataset,
+    Lc0GamesIterableSSLDataset,
+    Lc0GamesSSLDataset,
     SSLCollator
 )
 from ..tracking import AccumulationBuffer, MetricLogger
@@ -195,16 +197,16 @@ class SSLTrainer:
             self._current_dropout = self._dropout_fn(self._n_dropout_updates)
 
     def _load_datasets(self):
-        # dataset = LichessStandardIterableSSLDataset(
+        # dataset = Lc0GamesIterableSSLDataset(
         #     min_moves=self.data_config.min_moves,
         #     max_prediction_depth=self.data_config.max_prediction_depth,
         #     encoding=self.data_config.encoding,
-        #     min_elo=0
+        #     seed=self.training_config.seed
         # )
-        dataset = LichessStandardGamesSSLDataset(
+        dataset = Lc0GamesSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
-            encoding=self.data_config.encoding,
+            encoding=self.data_config.encoding
         )
 
         # print(f'{dataset.__class__.__name__} size: {len(dataset):,}')

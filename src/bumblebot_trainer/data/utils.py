@@ -285,7 +285,7 @@ def get_game_phase(board: chess.Board) -> str:
 
     return 'opening'
 
-def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']):
+def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']) -> int:
     """Parses a string result into a integer result.
     In case of: return value
     White wins: 1
@@ -309,6 +309,8 @@ def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']):
         case '0-1':
             return -1
         case '*':
+            return 0
+        case '':
             return 0
         case _:
             raise ValueError(f'Unable to parse chess game result {result_str}')

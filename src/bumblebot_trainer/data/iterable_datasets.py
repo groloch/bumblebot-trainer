@@ -76,3 +76,53 @@ class LichessStandardIterableDataset(IterablePositionDataset):
 
                 yield process_item(board, [node], self.encoding, self.temperature)
 
+
+class Lc0GamesIterableDataset(IterablePositionDataset):
+    """Lc0Games is a dataset of 170m games played by various versions of Leela Chess Zero
+     against itself.
+
+    This dataset is licensed under the odbl licence
+    """
+    def __init__(
+            self,
+            min_moves: int,
+            encoding: str,
+            shuffle_buffer_size: int = 10_000,
+            seed: int = 0
+        ):
+        super().__init__(encoding)
+
+        self.min_moves = min_moves
+
+        self.dataset = load_dataset(
+            'groloch/lc0_games',
+            split='train',
+            streaming=True
+        ).shuffle(seed=seed, buffer_size=shuffle_buffer_size)
+
+    def __iter__(self):
+        for item in self.dataset:
+            if item['variant'] != 'normal':
+                continue
+            moves = item['moves'].split()
+            game_length = len(moves) - self.min_moves
+
+            if game_length <= 0:
+                continue
+
+            board = chess.Board(item['start_fen'] or chess.STARTING_FEN, chess960=True)
+
+            for k in range(self.min_moves):
+                board.push(chess.Move.from_uci(moves[k]))
+
+            for move_idx in range(game_length):
+                uci_move = moves[self.min_moves+move_idx]
+                cp = None
+                mate = None
+
+                node = VariationNode(uci_move, cp=cp, mate=mate)
+
+                yield process_item(board, [node], self.encoding, self.temperature)
+
+                board.push(chess.Move.from_uci(uci_move))
+
