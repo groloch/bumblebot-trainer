@@ -1,4 +1,5 @@
 import os
+import copy
 import itertools
 
 import torch
@@ -25,6 +26,7 @@ from ..data import (
     Lc0GamesSSLDataset,
     SSLCollator
 )
+from ..eval import PuzzleEvaluator
 from ..tracking import AccumulationBuffer, MetricLogger
 from ..tracking.metrics import (
     accuracy_from_stats,
@@ -41,6 +43,7 @@ from ..config import (
     PredictorConfig,
     TrackingConfig,
     DropoutScheduleConfig,
+    EvaluationConfig,
 )
 
 
@@ -63,12 +66,14 @@ class SSLTrainer:
         # \ type hints
 
         print('Loading run configuration')
+        # Snapshot the raw config before _build_configs mutates it via pop().
+        raw_config = copy.deepcopy(config)
         self._build_configs(config)
 
         self.logdir = init_logdir(self.training_config.logdir, config_path)
         print(f'Logging to {self.logdir}')
 
-        init_run(self.training_config.seed, self.tracking_config)
+        init_run(self.training_config.seed, self.tracking_config, raw_config)
 
         print('Building model')
         self._build_model()
@@ -179,6 +184,9 @@ class SSLTrainer:
         self.tracking_config = TrackingConfig(**config['tracking'])
         self.data_config = SSLDataConfig(**config['data'])
 
+        eval_config = config.pop('evaluation', {})
+        self.eval_config = EvaluationConfig(**eval_config)
+
     def _build_model(self):
         self.model = SSLChessModel(self.model_config)
         self.teacher = AveragedModel(self.model, multi_avg_fn=get_ema_multi_avg_fn(self.training_config.ema_decay))
@@ -232,6 +240,16 @@ class SSLTrainer:
         self.teacher.eval()
         self.teacher.to(self.device)
         torch.compile(self.teacher, mode='max-autotune')
+
+        print('Loading puzzle evaluation dataset')
+        self.evaluator = PuzzleEvaluator(
+            model=self.model,
+            config=self.eval_config,
+            encoding=self.data_config.encoding,
+            device=self.device,
+            use_mlflow=self.tracking_config.use_mlflow,
+            logdir=self.logdir,
+        )
 
         self._optimizer_zero_grad(set_to_none=True)
 
@@ -445,6 +463,16 @@ class SSLTrainer:
                 self._optimizer_zero_grad(set_to_none=True)
 
                 step += 1
+
+                if step % self.eval_config.every == 0:
+                    eval_metrics = self.evaluator.run(step)
+                    pbar.write(
+                        f'[step {step}] puzzle Elo: {eval_metrics["puzzle/elo"]:.0f} '
+                        f'± {eval_metrics["puzzle/elo_std"]:.0f} | '
+                        f'solved: {eval_metrics["puzzle/solved_rate"]:.2%} | '
+                        f'move accuracy: {eval_metrics["puzzle/accuracy"]:.2%}'
+                    )
+
                 if step >= self.training_config.max_steps:
                     break
 

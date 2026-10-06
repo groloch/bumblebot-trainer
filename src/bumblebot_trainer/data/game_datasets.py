@@ -5,7 +5,7 @@ import chess, chess.pgn
 from datasets import load_dataset, VerificationMode, Value
 
 from .position_datasets import PositionDataset
-from .utils import san_to_uci, process_item, VariationNode, parse_result
+from .utils import san_to_uci, process_item, VariationNode, parse_result, encode_board, get_move_id
 
 
 class GamePositionDataset(PositionDataset):
@@ -169,6 +169,79 @@ class Lc0GamesDataset(GamePositionDataset):
         node = VariationNode(uci_move, cp=cp, mate=mate)
 
         return process_item(board, [node], self.encoding, self.temperature)
+
+
+class LichessPuzzlesDataset(PositionDataset):
+    """Dataset of Lichess puzzles, flattened over all of their solution moves.
+
+    Each puzzle is a FEN plus a move list that starts with the opponent's setup
+    move, followed by the player's solution moves interleaved with forced
+    opponent replies. The player's moves are therefore at odd indices
+    (1, 3, 5, ...) and the list always ends on a player move.
+
+    The dataset exposes one position per player move: item ``idx`` is the
+    position in which the player has to find their ``move_idx``-th solution move.
+    """
+    def __init__(self, encoding, num_puzzles: int = 100_000):
+        super().__init__(encoding)
+
+        self.dataset = load_dataset('Lichess/chess-puzzles', split='train')
+        num_puzzles = min(num_puzzles, len(self.dataset))
+
+        selected_themes = (
+            # Move type
+            'defensiveMove', 'zugzwang', 'sacrifice', 'mate', 'quietMove', 'fork',
+            'skewer', 'pin', 'intermezzo', 'clearance', 'attraction', 'xRayAttack',
+            'advancedPawn',
+
+            # Game phase
+            'opening', 'middlegame', 'endgame',
+            ''
+        )
+
+        self.dataset = self.dataset.select(range(num_puzzles)).map(
+            lambda x: {
+                'fen': x['FEN'],
+                'moves': x['Moves'].split(' '),
+                'rating': x['Rating'],
+                'themes': [t for t in x['Themes'] if t in selected_themes],
+                'puzzle_len': len(x['Moves'].split(' ')) // 2
+            }, num_proc=16
+        )
+
+        self.puzzles_lengths = np.cumsum(self.dataset['puzzle_len'])
+        # number of solution (player) moves per puzzle, indexed by puzzle index
+        self.puzzle_lens = np.diff(self.puzzles_lengths, prepend=0).astype(np.int64)
+        self.num_puzzles = len(self.dataset)
+        self.len = int(self.puzzles_lengths[-1])
+
+    def __len__(self):
+        return int(self.len)
+
+    def __getitem__(self, idx):
+        puzzle_idx = np.searchsorted(self.puzzles_lengths, idx, side='right')
+        if puzzle_idx == 0:
+            move_idx = idx
+        else:
+            move_idx = idx - self.puzzles_lengths[puzzle_idx - 1]
+
+        puzzle = self.dataset[puzzle_idx]
+        moves = puzzle['moves']
+        board = chess.Board(puzzle['fen'], chess960=True)
+
+        for k in range(2 * move_idx + 1):
+            board.push_uci(moves[k])
+
+        uci_move = moves[2 * move_idx + 1]
+
+        board_ = encode_board(board, self.encoding)
+        move_ = torch.tensor(
+            get_move_id(chess.Move.from_uci(uci_move), board.turn), dtype=torch.long
+        )
+        puzzle_idx_ = torch.tensor(puzzle_idx, dtype=torch.long)
+        rating_ = torch.tensor(float(puzzle['rating']), dtype=torch.float32)
+
+        return board_, move_, puzzle_idx_, rating_
 
 
 class SingleGameDataset(PositionDataset):

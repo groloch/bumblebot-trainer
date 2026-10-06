@@ -1,11 +1,11 @@
 type: "ssl"
 model:
-  hidden_size: 256
+  hidden_size: 384
   encoder_name: "cf"
   encoder:
-    num_layers: 6
-    intermediate_size: 384
-    num_heads: 16
+    num_layers: 12
+    intermediate_size: 512
+    num_heads: 32
     compressed_dim: 32
     smolgen_dim: 128
     gen_dim: 128
@@ -21,26 +21,36 @@ training:
   weight_decay: 0.00001
   max_grad_norm: 2.0
   seed: 34657
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   num_workers: 8
   logdir: "logs"
   save_every: 1000
   ema_decay: 0.99
   name: "bumblebot-ssl"
-  policy_loss_weight: 0.5
+  policy_loss_weight: 1.0
   value_loss_weight: 0.1
-  ssl_loss_weight: 0.0
-  perceptive_loss_weight: 2.0
+  ssl_loss_weight: 0.5
+  perceptive_loss_weight: 1.0
   dropout_schedule:
-    min_dropout: 0.4
-    max_dropout: 0.4
+    min_dropout: 0.2
+    max_dropout: 0.2
     convergence_rate: 0.1
     policy_accuracy_threshold: 0.8
     min_steps_between_updates: 50
 data:
   min_moves: 30
   max_prediction_depth: 10
-  encoding: 'legal'
+  encoding: 'lc0'
+evaluation:
+  every: 500
+  batch_size: 512
+  num_workers: 8
+  num_puzzles: 100000
+  prior_elo_mean: 1500.0
+  prior_elo_std: 1000.0
+  elo_min: 200.0
+  elo_max: 3800.0
+  elo_step: 2.0
 tracking:
   experiment_name: "ForecastEngine-SSL"
   tracking_uri: "sqlite:///mlflow.db"

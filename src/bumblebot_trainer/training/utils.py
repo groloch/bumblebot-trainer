@@ -22,7 +22,26 @@ def init_logdir(logdir: str, config_path: str) -> str:
     shutil.copy2(config_path, proposed_logdir)
     return proposed_logdir
 
-def init_run(seed, tracking_config: TrackingConfig):
+def flatten_config(config: dict, prefix: str = '') -> dict:
+    """Flatten a nested config dict into a single level, joining keys with '.'."""
+    flat = {}
+    for key, value in config.items():
+        name = f'{prefix}{key}'
+        if isinstance(value, dict):
+            flat.update(flatten_config(value, prefix=f'{name}.'))
+        else:
+            flat[name] = value
+    return flat
+
+
+def log_config(config: dict):
+    """Log the entire config dict to the active MLflow run."""
+    flat = {key: str(value) for key, value in flatten_config(config).items()}
+    mlflow.log_params(flat)
+    mlflow.log_dict(config, 'config.json')
+
+
+def init_run(seed, tracking_config: TrackingConfig, config: dict | None = None):
     if not(torch.cuda.is_available()):
         print("CUDA is not available. Exiting.")
         sys.exit(1)
@@ -35,6 +54,8 @@ def init_run(seed, tracking_config: TrackingConfig):
         mlflow.set_tracking_uri(tracking_config.tracking_uri)
         mlflow.set_experiment(tracking_config.experiment_name)
         mlflow.start_run()
+        if config is not None:
+            log_config(config)
 
 def model_parameters(model: torch.nn.Module):
     total_params = sum(p.numel() for p in model.parameters())
