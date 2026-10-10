@@ -4,6 +4,7 @@ import torch.nn.functional as F
 
 from .encoder import Encoder, EncoderOutput
 from ...config import CFEncoderConfig
+from ...utils import ChessConstants
 
 
 class FFN(nn.Module):
@@ -32,7 +33,10 @@ class MHA(nn.Module):
             num_heads: int,
             compressed_dim: int,
             smolgen_dim: int,
-            gen_dim: int):
+            gen_dim: int,
+            use_legal_embeds: bool=False,
+            use_attacks_embeds: bool=False,
+            per_layer_posembeds: bool=False):
         super().__init__()
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         self.hidden_size = hidden_size
@@ -51,11 +55,31 @@ class MHA(nn.Module):
             num_heads=num_heads
         )
 
-    def forward(self, x: torch.Tensor, shared_gen: nn.Module) -> torch.Tensor:
+        self.use_legal_embeds = use_legal_embeds
+        if use_legal_embeds:
+            self.qlegal = nn.Linear(64, hidden_size)
+
+        self.use_attacks_embeds = use_attacks_embeds
+        if use_attacks_embeds:
+            self.kattacks = nn.Linear(64, hidden_size)
+
+        self.per_layer_posembeds = per_layer_posembeds
+
+    def forward(self, x: torch.Tensor, shared_gen: nn.Module, **kwargs) -> torch.Tensor:
         B, N, _ = x.shape
-        qkv = self.qkv(x)
+        qkv: torch.Tensor = self.qkv(x)
 
         q, k, v = qkv.chunk(3, dim=-1)
+
+        if self.use_legal_embeds:
+            q = q + self.qlegal(kwargs['legal'])
+        if self.use_attacks_embeds:
+            k = k + self.kattacks(kwargs['attacks'])
+
+        if self.per_layer_posembeds:
+            q = q + kwargs['pos_embeds']
+            k = k + kwargs['pos_embeds']
+
         q = q.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         v = v.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
@@ -91,14 +115,14 @@ class Smolgen(nn.Module):
         self.gen_dim = gen_dim
 
         self.compress = nn.Linear(hidden_size, compressed_dim)
-        self.l1 = nn.Linear(compressed_dim * 64, smolgen_dim)
+        self.l1 = nn.Linear(compressed_dim , smolgen_dim)
         self.n1 = nn.LayerNorm(smolgen_dim)
         self.l2 = nn.Linear(smolgen_dim, gen_dim * num_heads)
         self.n2 = nn.LayerNorm(gen_dim * num_heads)
 
     def forward(self, x: torch.Tensor, shared_gen: nn.Module) -> torch.Tensor:
         B = x.size(0)
-        x = self.compress(x).view(B, -1)
+        x = self.compress(x).mean(dim=1, keepdim=False)
         x = self.n1(F.silu(self.l1(x)))
 
         x = self.n2(F.silu(self.l2(x)))
@@ -117,7 +141,8 @@ class EncoderLayer(nn.Module):
             num_heads: int,
             compressed_dim: int,
             smolgen_dim: int,
-            gen_dim: int):
+            gen_dim: int,
+            **kwargs):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
@@ -128,18 +153,19 @@ class EncoderLayer(nn.Module):
             num_heads,
             compressed_dim,
             smolgen_dim,
-            gen_dim
+            gen_dim,
+            **kwargs
         )
         self.ffn = FFN(hidden_size, intermediate_size)
 
-    def forward(self, x: torch.Tensor, shared_gen: nn.Module) -> torch.Tensor:
-        x = self.mha(x, shared_gen)
+    def forward(self, x: torch.Tensor, shared_gen: nn.Module, **kwargs) -> torch.Tensor:
+        x = self.mha(x, shared_gen, **kwargs)
         x = self.ffn(x)
         return x
 
 
 class CFEncoder(Encoder):
-    def __init__(self, config: CFEncoderConfig):
+    def __init__(self, config: CFEncoderConfig, **kwargs):
         super().__init__(config)
 
         self.layers = nn.ModuleList(
@@ -151,6 +177,7 @@ class CFEncoder(Encoder):
                     compressed_dim=config.compressed_dim,
                     smolgen_dim=config.smolgen_dim,
                     gen_dim=config.gen_dim,
+                    **kwargs
                 )
                 for _ in range(config.num_layers)
             ]
@@ -161,7 +188,11 @@ class CFEncoder(Encoder):
             64*64
         )
 
-    def forward(self, x: torch.Tensor) -> EncoderOutput:
+        self.shared_posembed = nn.Parameter(
+            torch.randn(ChessConstants.CONTEXT_LENGTH, config.hidden_size) * 0.02, requires_grad=True
+        )
+
+    def forward(self, x: torch.Tensor, **kwargs) -> EncoderOutput:
         for layer in self.layers:
-            x = layer(x, self.shared_gen)
+            x = layer(x, self.shared_gen, pos_embeds=self.shared_posembed, **kwargs)
         return self._pack_output(x)

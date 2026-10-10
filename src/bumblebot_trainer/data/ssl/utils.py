@@ -19,7 +19,7 @@ class SSLCollator:
         self.max_lookahead = max_lookahead
 
     def __call__(self, batch):
-        tokens, tokens_, moves_list, lengths, targets = zip(*batch)
+        tokens, tokens_, moves_list, lengths, targets, extra, extra_ = zip(*batch)
 
         tokens = torch.stack(tokens)
         tokens_ = torch.stack(tokens_)
@@ -47,7 +47,11 @@ class SSLCollator:
             1, 1, SSLConstants.NUM_TOKENS_PER_MOVE
         ).view(batch_size, -1)
 
-        return tokens, tokens_, targets, moves, moves_attention_mask
+        keys = extra[0].keys()
+        extra = {k: torch.stack([e[k] for e in extra]) for k in keys}
+        extra_ = {k: torch.stack([e_[k] for e_ in extra_]) for k in keys}
+
+        return tokens, tokens_, targets, moves, moves_attention_mask, extra, extra_
 
 
 def encode_move_for_predictor(
@@ -127,43 +131,17 @@ def apply_td_value(
 
     return value
 
-def encode_both_boards(
+def encode_move_sequence(
         board: chess.Board,
-        encoding: str,
-        min_moves: int,
-        move_idx: int,
-        target_idx: int,
         movelist: list[str],
-        result: int
+        start_idx: int,
+        end_idx: int
     ):
-    """Encodes two chess boards from a single game for ssl training
-
-    Args:
-        board (chess.Board): the current board
-        encoding (str): the encoding to apply
-        min_moves (int): the minimum moves of games kept (offset)
-        move_idx (int): current move idx
-        target_idx (int): index of the last move to play to get the future board
-        movelist (list[str]): list of moves in the game
-        result (int): result of the game
-
-    Returns:
-        tuple: current board tokens, future board tokens, the predictor move sequence,
-        its length, and a target dict with `policy`/`value` (current board) and
-        `policy_`/`value_` (future board).
-    """
-    advancement = (min_moves + move_idx) / len(movelist)
-    node = VariationNode(
-        movelist[min_moves + move_idx],
-        expected_result=apply_td_value(board.turn, advancement, result)
-    )
-    tokens, targets = process_item(board, [node], encoding)
-
-    movelist_ = torch.zeros((target_idx - move_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
+    moves = torch.zeros((end_idx - start_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
     board_ = board.copy()
-    for k in range(min_moves+move_idx, min_moves+target_idx):
-        move = chess.Move.from_uci(movelist[k])
 
+    for k in range(start_idx, end_idx):
+        move = chess.Move.from_uci(movelist[k])
         moved_piece_type = board_.piece_at(move.from_square).piece_type
 
         if board_.piece_at(move.to_square) is None:
@@ -171,13 +149,12 @@ def encode_both_boards(
                 taken_piece_type = chess.PAWN
             else:
                 taken_piece_type = None
+        elif board_.piece_at(move.to_square).color == board_.turn:
+            taken_piece_type = None
         else:
-            if board_.piece_at(move.to_square).color == board_.turn:
-                taken_piece_type = None
-            else:
-                taken_piece_type = board_.piece_at(move.to_square).piece_type
+            taken_piece_type = board_.piece_at(move.to_square).piece_type
 
-        movelist_[k - (min_moves+move_idx), :] = encode_move_for_predictor(
+        moves[k - start_idx, :] = encode_move_for_predictor(
             move=move,
             piece_type=moved_piece_type,
             taken_piece_type=taken_piece_type,
@@ -186,26 +163,31 @@ def encode_both_boards(
         )
         board_.push(move)
 
-    advancement_ = (min_moves + target_idx) / len(movelist)
-    future_value = apply_td_value(board_.turn, advancement_, result)
+    return moves, board_
 
-    if min_moves + target_idx < len(movelist):
-        node_ = VariationNode(
-            movelist[min_moves + target_idx],
-            expected_result=future_value
-        )
-        tokens_, targets_ = process_item(board_, [node_], encoding)
-    else:
-        # the future position is terminal: no next move to predict, the policy
-        # target is left empty (all zeros) and thus contributes no policy loss
-        tokens_ = encode_board(board_, encoding)
-        targets_ = {
-            'policy': torch.zeros(ChessConstants.NUM_POLICY_CLASSES, dtype=torch.float),
-            'value': torch.tensor(future_value, dtype=torch.float)
-        }
 
-    target_dict = targets
-    target_dict['policy_'] = targets_['policy']
-    target_dict['value_'] = targets_['value']
+def encode_both_boards(
+        board: chess.Board,
+        nodes: list[VariationNode],
+        nodes_: list[VariationNode],
+        encoding: str,
+        min_moves: int,
+        move_idx: int,
+        target_idx: int,
+        movelist: list[str],
+        value: float | torch.Tensor | None = None,
+        value_: float | torch.Tensor | None = None
+    ):
+    tokens, targets, extra = process_item(board, nodes, encoding, value=value)
+    movelist_, board_ = encode_move_sequence(
+        board=board,
+        movelist=movelist,
+        start_idx=min_moves + move_idx,
+        end_idx=min_moves + target_idx
+    )
+    tokens_, targets_, extra_ = process_item(board_, nodes_, encoding, value=value_)
 
-    return tokens, tokens_, movelist_, target_idx - move_idx, target_dict
+    targets['policy_'] = targets_['policy']
+    targets['value_'] = targets_['value']
+
+    return tokens, tokens_, movelist_, target_idx - move_idx, targets, extra, extra_

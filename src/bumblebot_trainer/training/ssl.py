@@ -24,6 +24,8 @@ from ..data import (
     LichessStandardGamesSSLDataset,
     Lc0GamesIterableSSLDataset,
     Lc0GamesSSLDataset,
+    T91GamesSSLDataset,
+    T91GamesIterableSSLDataset,
     SSLCollator
 )
 from ..eval import PuzzleEvaluator
@@ -211,7 +213,7 @@ class SSLTrainer:
         #     encoding=self.data_config.encoding,
         #     seed=self.training_config.seed
         # )
-        dataset = Lc0GamesSSLDataset(
+        dataset = T91GamesSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,
             encoding=self.data_config.encoding
@@ -271,10 +273,8 @@ class SSLTrainer:
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
         policy_stats = torch.zeros(2, device=self.device)
         policy_top3_stats = torch.zeros(2, device=self.device)
-        value_error_stats = torch.zeros(2, device=self.device)
         perceptive_policy_stats = torch.zeros(2, device=self.device)
         perceptive_policy_top3_stats = torch.zeros(2, device=self.device)
-        perceptive_value_error_stats = torch.zeros(2, device=self.device)
 
         tokens: torch.Tensor
         tokens_: torch.Tensor
@@ -282,8 +282,11 @@ class SSLTrainer:
         moves: torch.Tensor
         moves_attention_mask: torch.Tensor
 
+        extra: dict[str, torch.Tensor]
+        extra_: dict[str, torch.Tensor]
+
         for partial_step, batch in enumerate(self.train_dataloader):
-            tokens, tokens_, targets, moves, moves_attention_mask = batch
+            tokens, tokens_, targets, moves, moves_attention_mask, extra, extra_ = batch
 
             tokens = tokens.to(self.device, non_blocking=True)
             tokens_ = tokens_.to(self.device, non_blocking=True)
@@ -295,14 +298,18 @@ class SSLTrainer:
             moves = moves.to(self.device, non_blocking=True)
             moves_attention_mask = moves_attention_mask.to(self.device, non_blocking=True)
 
+            extra = {k: v.to(self.device, non_blocking=True) for k, v in extra.items()}
+            extra_ = {k: v.to(self.device, non_blocking=True) for k, v in extra_.items()}
+
             # jepa-like forward pass
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():
-                    _, target_embed = self.teacher.module.embed(tokens_)
+                    _, target_embed = self.teacher.module.embed(tokens_, **extra_)
 
                 student_embed, logits, losses = self.model(
                     tokens,
-                    target=target
+                    target=target,
+                    **extra
                 )
                 pred_raw, pred_norm = self.predictor(
                     student_embed,
@@ -325,7 +332,6 @@ class SSLTrainer:
                 perceptive_policy_logits = perceptive_logits['policy']
 
                 perceptive_value_loss = perceptive_losses['value']
-                perceptive_value_logits = perceptive_logits['value']
 
                 total_loss = ssl_loss / gradient_accumulation_steps * self.training_config.ssl_loss_weight
 
@@ -364,7 +370,6 @@ class SSLTrainer:
                 value_loss.detach() * self.training_config.value_loss_weight,
                 partial_step
             )
-            value_error_stats += mae_stats(torch.sigmoid(logits['value'].detach()), target['value'])
 
             acc_buffer.update(
                 'perceptive_policy_loss_unscaled', perceptive_policy_loss.detach(),
@@ -393,10 +398,6 @@ class SSLTrainer:
                     self.training_config.value_loss_weight * self.training_config.perceptive_loss_weight,
                 partial_step
             )
-            perceptive_value_error_stats += mae_stats(
-                torch.sigmoid(perceptive_value_logits.detach()),
-                target_['value']
-            )
             # \ metrics
 
             if (partial_step + 1) % gradient_accumulation_steps == 0:
@@ -423,7 +424,6 @@ class SSLTrainer:
 
                 self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
                 self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
-                self.logger.update('value_mae', mae_from_stats(value_error_stats).item())
 
                 self.logger.update(
                     'perceptive_policy_loss_unscaled',
@@ -445,19 +445,13 @@ class SSLTrainer:
                     acc_buffer.get_mean('perceptive_value_loss_unscaled')
                 )
                 self.logger.update('perceptive_value_loss', acc_buffer.get_mean('perceptive_value_loss'))
-                self.logger.update(
-                    'perceptive_value_mae',
-                    mae_from_stats(perceptive_value_error_stats).item()
-                )
                 # \ tracking
 
                 acc_buffer.reset()
                 policy_stats.zero_()
                 policy_top3_stats.zero_()
-                value_error_stats.zero_()
                 perceptive_policy_stats.zero_()
                 perceptive_policy_top3_stats.zero_()
-                perceptive_value_error_stats.zero_()
                 pbar.update(1)
 
                 self._optimizer_zero_grad(set_to_none=True)
@@ -482,7 +476,6 @@ class SSLTrainer:
                             self.logger.log(step, exclude_if_contains=[
                                 'unscaled',
                                 'perceptive',
-                                'top3',
                                 'loss'
                             ])
                         }'

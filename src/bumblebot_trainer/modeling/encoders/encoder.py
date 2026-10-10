@@ -47,7 +47,7 @@ class BertEncoder(Encoder):
             num_attention_heads=config.num_heads,
             intermediate_size=config.intermediate_size,
             max_position_embeddings=ChessConstants.CONTEXT_LENGTH,
-            num_labels=None,
+            num_labels=1,
             pad_token_id=0,
             bos_token_id=0,
             eos_token_id=0,
@@ -55,7 +55,7 @@ class BertEncoder(Encoder):
 
         self.transformer = BertModel(bert_config)
 
-    def forward(self, x: torch.Tensor) -> EncoderOutput:
+    def forward(self, x: torch.Tensor, **kwargs) -> EncoderOutput:
         latents = self.transformer(inputs_embeds=x).last_hidden_state
 
         return self._pack_output(latents)

@@ -2,6 +2,7 @@ from torch.utils.data import IterableDataset
 from datasets import load_dataset, VerificationMode
 from huggingface_hub import list_repo_tree
 import chess
+import numpy as np
 
 from .utils import process_item, VariationNode, san_to_uci
 
@@ -126,3 +127,72 @@ class Lc0GamesIterableDataset(IterablePositionDataset):
 
                 board.push(chess.Move.from_uci(uci_move))
 
+
+class T91GamesIterableDataset(IterablePositionDataset):
+    """groloch/lc0_training_T91_10m is a dataset of 10m games played Leela Chess Zero
+     against itself during its extended RL runs.
+
+    This dataset is licensed under the odbl licence
+    """
+    def __init__(
+            self,
+            min_moves: int,
+            encoding: str,
+            shuffle_buffer_size: int = 10_000,
+            seed: int = 0
+        ):
+        super().__init__(encoding)
+
+        self.min_moves = min_moves
+
+        # self.dataset = load_dataset(
+        #     'groloch/lc0_training_T91_10m',
+        #     split='train',
+        #     streaming=True
+        # )
+
+        self.dataset = load_dataset(
+            'parquet',
+            data_files='/home/baptiste/data/ai/datasets/lc0_training/tmp/*.parquet',
+            split='train',
+            streaming=True
+        )
+        
+        self.dataset = self.dataset.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
+
+    def __iter__(self):
+        while True:
+            for item in self.dataset:
+                moves = item['movelist'].split()
+                game_length = len(moves) - self.min_moves
+
+                if game_length <= 0:
+                    continue
+
+                move_idx = self.min_moves + np.random.randint(game_length)
+                fen = item['fen'] if item['fen'] is not None else chess.STARTING_FEN
+                board = chess.Board(fen, chess960=True)
+
+                for move in moves[:move_idx]:
+                    board.push_uci(move)
+
+                legal_moves = sorted(move.uci() for move in board.legal_moves)
+                policy = item['policies'][move_idx]
+
+                if len(legal_moves) != len(policy):
+                    raise ValueError('T91 policy length does not match the number of legal moves')
+
+                nodes = [
+                    VariationNode(move=move, probability=percentage/100.0)
+                    for move, percentage in zip(legal_moves, policy)
+                ]
+
+                qvalue = float(item['qvalues'][move_idx])
+                dvalue = float(item['dvalues'][move_idx]) # TODO use
+                value = qvalue
+
+                if board.turn == chess.BLACK:
+                    value = 1.0 - value
+
+                value = min(max(value, 0.0), 1.0)
+                return process_item(board, nodes, self.encoding, self.temperature, value=value)

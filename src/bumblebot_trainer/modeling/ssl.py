@@ -30,7 +30,9 @@ class SSLChessModel(nn.Module):
         )
         self.encoder = build_encoder(
             config.encoder_name,
-            config=config.encoder_config
+            config=config.encoder_config,
+            use_legal_embeds=True,
+            per_layer_posembeds=True
         )
         self.policy_head = PolicyHead(
             hidden_size=config.hidden_size,
@@ -44,9 +46,10 @@ class SSLChessModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            target: dict[str, torch.Tensor] | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+            target: dict[str, torch.Tensor] | None = None,
+            **kwargs) -> tuple[torch.Tensor, torch.Tensor | None]:
 
-        x, x_norm = self.embed(x)
+        x, x_norm = self.embed(x, **kwargs)
 
         if target is None:
             return x_norm, None, None
@@ -54,7 +57,7 @@ class SSLChessModel(nn.Module):
         logits, losses = self.heads_out(x, target)
         return x_norm, logits, losses
 
-    def embed(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def embed(self, x: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
         """Embeds the input tensor and returns embeddings (raw and normalized along the last dimension).
 
         Args:
@@ -65,7 +68,7 @@ class SSLChessModel(nn.Module):
             torch.Tensor: normalized square embeddings of shape (B, 64, hidden_size)
         """
         x = self.embedding(x)
-        x: EncoderOutput = self.encoder(x)
+        x: EncoderOutput = self.encoder(x, **kwargs)
         sq_emb: torch.Tensor = x.squares_embeddings
         x_norm = nn.functional.normalize(sq_emb, p=2, dim=-1)
         return sq_emb, x_norm

@@ -44,8 +44,8 @@ class PuzzleEvaluator:
         self.puzzle_lens = self.dataset.puzzle_lens
         self.num_puzzles = self.dataset.num_puzzles
 
-    def _policy_logits(self, tokens: torch.Tensor) -> torch.Tensor:
-        squares_embeddings, _ = self.model.embed(tokens)
+    def _policy_logits(self, tokens: torch.Tensor, **kwargs) -> torch.Tensor:
+        squares_embeddings, _ = self.model.embed(tokens, **kwargs)
         return self.model.policy_head(squares_embeddings, None).logits
 
     @torch.no_grad()
@@ -64,9 +64,11 @@ class PuzzleEvaluator:
         use_autocast = self.device.type == 'cuda'
 
         pbar = tqdm(self.dataloader, desc='Solving puzzles', leave=False)
-        for tokens, move_ids, puzzle_ids, ratings in pbar:
+        for tokens, move_ids, puzzle_ids, ratings, extra in pbar:
             tokens = tokens.to(self.device, non_blocking=True)
             move_ids = move_ids.to(self.device, non_blocking=True)
+
+            extra = {k: v.to(self.device, non_blocking=True) for k, v in extra.items()}
 
             puzzle_ids_np = puzzle_ids.numpy()
             ratings_np = ratings.numpy()
@@ -76,7 +78,7 @@ class PuzzleEvaluator:
                 dtype=torch.bfloat16,
                 enabled=use_autocast,
             ):
-                logits = self._policy_logits(tokens)
+                logits = self._policy_logits(tokens, **extra)
 
             predictions = logits.argmax(dim=-1)
             correct = (predictions == move_ids).cpu().numpy()

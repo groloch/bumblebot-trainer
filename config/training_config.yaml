@@ -1,10 +1,10 @@
 type: "ssl"
 model:
-  hidden_size: 384
+  hidden_size: 256
   encoder_name: "cf"
   encoder:
-    num_layers: 12
-    intermediate_size: 512
+    num_layers: 16
+    intermediate_size: 384
     num_heads: 32
     compressed_dim: 32
     smolgen_dim: 128
@@ -14,21 +14,21 @@ predictor:
   intermediate_size: 1024
   num_heads: 16
 training:
-  max_steps: 10000
-  batch_size: 256
+  max_steps: 75000
+  batch_size: 512
   learning_rate: 3e-4
   warmup_steps: 1000
   weight_decay: 0.00001
   max_grad_norm: 2.0
   seed: 34657
   gradient_accumulation_steps: 1
-  num_workers: 8
+  num_workers: 16
   logdir: "logs"
-  save_every: 1000
-  ema_decay: 0.99
+  save_every: 10000
+  ema_decay: 0.999
   name: "bumblebot-ssl"
   policy_loss_weight: 1.0
-  value_loss_weight: 0.1
+  value_loss_weight: 0.3
   ssl_loss_weight: 0.5
   perceptive_loss_weight: 1.0
   dropout_schedule:
@@ -40,10 +40,10 @@ training:
 data:
   min_moves: 30
   max_prediction_depth: 10
-  encoding: 'lc0'
+  encoding: 'legal'
 evaluation:
-  every: 500
-  batch_size: 512
+  every: 2500
+  batch_size: 256
   num_workers: 8
   num_puzzles: 100000
   prior_elo_mean: 1500.0

@@ -89,7 +89,7 @@ def encode_board(
         tokens[:, 109] = board.halfmove_clock / 100.0
         tokens[:, 111] = 1.0
 
-        return tokens
+        return tokens, {}
 
     if encoding_type == 'simplified':
         tokens = torch.zeros((64, 18), dtype=torch.float32)
@@ -110,7 +110,7 @@ def encode_board(
         tokens[:, 16] = board.halfmove_clock / 100.0
         if board.ep_square is not None:
             tokens[board.ep_square, 17] = 1.0
-        return tokens
+        return tokens, {}
 
     if encoding_type == 'legal':
         tokens = torch.zeros((64, 18+64), dtype=torch.float32)
@@ -134,7 +134,9 @@ def encode_board(
 
         for move in board.legal_moves:
             tokens[move.from_square, 18+move.to_square] = 1
-        return tokens
+        return tokens, {
+            'legal': tokens[:, 18:].clone()
+        }
 
     raise ValueError(f"Unknown encoding type: {encoding_type}")
     return None
@@ -144,11 +146,11 @@ def process_item(
             nodes: list[VariationNode],
             encoding: str,
             temperature: float = 0.1,
-            value: Optional[float] = None):
+            value: Optional[float | torch.Tensor] = None):
         """Utility function for datasets that converts chess position
         into batchable model inputs.
         """
-        tokens = encode_board(board, encoding)
+        tokens, extra = encode_board(board, encoding)
 
         indices = torch.zeros((len(nodes),), dtype=torch.long)
         evals = torch.zeros((len(nodes),), dtype=torch.float)
@@ -179,7 +181,10 @@ def process_item(
             policy_target = policy_target.nan_to_num(neginf=0)
 
         if value is not None:
-            value_target = torch.tensor(value)
+            if isinstance(value, torch.Tensor):
+                value_target = value
+            else:
+                value_target = torch.tensor(value)
         else:
             value_target = torch.max(evals)
 
@@ -191,6 +196,7 @@ def process_item(
         return (
             tokens,
             target_dict,
+            extra
         )
 
 def _backrank_sparse(board: chess.Board) -> bool:

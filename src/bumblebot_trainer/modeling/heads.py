@@ -78,16 +78,16 @@ class ValueHead(nn.Module):
         self.value_proj = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
-            nn.Linear(hidden_size, 1)
+            nn.Linear(hidden_size, 3)
         )
 
         self.loss_fn = loss_fn
 
     def forward(self, cls_embedding: torch.Tensor, target: torch.Tensor = None) -> ValueOutput:
-        value = self.value_proj(cls_embedding).squeeze(-1)
+        value = self.value_proj(cls_embedding)
 
         if target is not None:
-            loss = self.loss_fn(nn.functional.sigmoid(value), target)
+            loss = self.loss_fn(value, target)
         else:
             loss = None
         return ValueOutput(logits=value, loss=loss)

@@ -25,9 +25,9 @@ class ChessModel(nn.Module):
         )
 
         cls_loss_fn = nn.CrossEntropyLoss(
-            ignore_index=-100,
+            ignore_index=-100
         )
-        reg_loss_fn = nn.functional.smooth_l1_loss
+        reg_loss_fn = nn.CrossEntropyLoss()
 
         self.policy_head = PolicyHead(model_config.hidden_size, cls_loss_fn)
         self.value_head = ValueHead(model_config.hidden_size, reg_loss_fn)
@@ -35,8 +35,9 @@ class ChessModel(nn.Module):
     def forward(
             self,
             x: torch.Tensor,
-            target_dict: dict = {}) -> tuple[EncoderOutput, PolicyOutput, ValueOutput]:
-        x: EncoderOutput = self.embed(x)
+            target_dict: dict = {},
+            **kwargs) -> tuple[EncoderOutput, PolicyOutput, ValueOutput]:
+        x: EncoderOutput = self.embed(x, **kwargs)
 
         policy_out: PolicyOutput = self.policy_head(
             x.squares_embeddings,
@@ -49,6 +50,6 @@ class ChessModel(nn.Module):
 
         return x, policy_out, value_out
 
-    def embed(self, x: torch.Tensor) -> EncoderOutput:
-        return self.encoder(self.embedding(x))
+    def embed(self, x: torch.Tensor, **kwargs) -> EncoderOutput:
+        return self.encoder(self.embedding(x), **kwargs)
 

@@ -39,10 +39,10 @@ class LichessStandardGamesDataset(GamePositionDataset):
             'data/year=2025/month=01/train-00002-of-00072.parquet',
             'data/year=2025/month=01/train-00003-of-00072.parquet',
 
-            'data/year=2025/month=01/train-00004-of-00072.parquet',
-            'data/year=2025/month=01/train-00005-of-00072.parquet',
-            'data/year=2025/month=01/train-00006-of-00072.parquet',
-            'data/year=2025/month=01/train-00007-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00004-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00005-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00006-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00007-of-00072.parquet',
             # 'data/year=2025/month=01/train-00008-of-00072.parquet',
             # 'data/year=2025/month=01/train-00009-of-00072.parquet',
             # 'data/year=2025/month=01/train-00010-of-00072.parquet',
@@ -171,6 +171,96 @@ class Lc0GamesDataset(GamePositionDataset):
         return process_item(board, [node], self.encoding, self.temperature)
 
 
+class T91GamesDataset(GamePositionDataset):
+    def __init__(self, min_moves: int, encoding: str):
+        super().__init__(min_moves, encoding)
+
+        # self.dataset = load_dataset(
+        #     'groloch/lc0_training_T91_10m',
+        #     split='train',
+        # )
+        self.dataset = load_dataset(
+            'parquet',
+            data_files='/home/baptiste/data/ai/datasets/lc0_training/tmp/*.parquet',
+            split='train',
+        )
+
+        self.dataset = self.dataset.map(
+            lambda x: {**x, 'game_length': len(x['movelist'].split(' '))-min_moves},
+            num_proc=28
+        ).filter(
+            lambda x: x['game_length'] > 0,
+            num_proc=28
+        )
+
+        self.games_lengths = np.cumsum(self.dataset['game_length'])
+        self.len = int(self.games_lengths[-1])
+
+        self.wdl_temp = 0.15
+
+    def _get_nodes(self, board: chess.Board, game, position_idx: int):
+        legal_moves = sorted(move.uci() for move in board.legal_moves)
+        policy = game['policies'][position_idx]
+
+        if len(legal_moves) != len(policy):
+            raise ValueError('Policy length does not match the number of legal moves')
+
+        return [
+            VariationNode(move=move, probability=percentage/100.0)
+            for move, percentage in zip(legal_moves, policy)
+        ]
+
+    def _get_wdl(self, board: chess.Board, game, position_idx: int) -> float:
+        value = game['qvalues'][position_idx]
+        dvalue = game['dvalues'][position_idx]
+
+        if value is None:
+            i = 1
+            while value is None:
+                value = game['qvalues'][position_idx-i]
+                i+=1
+        if dvalue is None:
+            i = 1
+            while dvalue is None:
+                dvalue = game['qvalues'][position_idx-i]
+                i+=1
+
+        if board.turn == chess.BLACK:
+            value = 1.0 - value
+
+        win = (value + 1) / 2
+        draw = dvalue
+        loss = 1-win
+
+        wdl = torch.as_tensor([win, draw, loss], dtype=float)
+        return (wdl / self.wdl_temp).softmax(dim=-1)
+
+    def __getitem__(self, idx):
+        game_idx = np.searchsorted(self.games_lengths, idx, side='right')
+        if game_idx == 0:
+            move_idx = idx
+        else:
+            move_idx = idx - self.games_lengths[game_idx - 1]
+
+        game = self.dataset[game_idx]
+        position_idx = self.min_moves + move_idx
+        fen = game['fen'] if game['fen'] is not None else chess.STARTING_FEN
+        board = chess.Board(fen, chess960=True)
+
+        for move in game['moves'][:position_idx]:
+            board.push_uci(move)
+
+        nodes = self._get_nodes(board, game, position_idx)
+        value = self._get_wdl(board, game, position_idx)
+        return process_item(
+            board,
+            nodes,
+            self.encoding,
+            self.temperature,
+            value=value
+        )
+
+
 class LichessPuzzlesDataset(PositionDataset):
     """Dataset of Lichess puzzles, flattened over all of their solution moves.
 
@@ -234,14 +324,14 @@ class LichessPuzzlesDataset(PositionDataset):
 
         uci_move = moves[2 * move_idx + 1]
 
-        board_ = encode_board(board, self.encoding)
+        board_, extra_ = encode_board(board, self.encoding)
         move_ = torch.tensor(
             get_move_id(chess.Move.from_uci(uci_move), board.turn), dtype=torch.long
         )
         puzzle_idx_ = torch.tensor(puzzle_idx, dtype=torch.long)
         rating_ = torch.tensor(float(puzzle['rating']), dtype=torch.float32)
 
-        return board_, move_, puzzle_idx_, rating_
+        return board_, move_, puzzle_idx_, rating_, extra_
 
 
 class SingleGameDataset(PositionDataset):
