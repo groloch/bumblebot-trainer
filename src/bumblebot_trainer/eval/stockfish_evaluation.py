@@ -1,4 +1,3 @@
-import csv
 import json
 import multiprocessing as mp
 import os
@@ -12,6 +11,7 @@ import numpy as np
 from tqdm import tqdm
 
 from ..config import StockfishEvaluationConfig
+from .book import load_openings
 from .onnx_policy import OnnxPolicyModel
 from .stockfish_game_worker import play_game_pair
 from ..utils import build_model_config, load_config_file
@@ -61,7 +61,6 @@ def _load_model_from_logdir(
             + ', '.join(path.name for path in config_paths)
         )
 
-    # Reuse the project config helpers; leave the source config and logdir untouched.
     config = load_config_file(str(config_paths[0]))
     training_name = config.get('training', {}).get('name')
     if not training_name:
@@ -122,20 +121,6 @@ def _load_standalone_onnx(
     )
     print(f'Loaded standalone ONNX policy from {checkpoint} using {model.providers}')
     return model, encoding, checkpoint
-
-
-def _load_openings(book_path: Path) -> list[str]:
-    if not book_path.is_file():
-        raise FileNotFoundError(f'Opening book not found: {book_path}')
-
-    openings = []
-    with book_path.open(newline='') as book_file:
-        for row in csv.reader(book_file, delimiter=';'):
-            if row and row[0].strip():
-                openings.append(row[0].strip())
-    if not openings:
-        raise ValueError(f'No starting positions found in opening book {book_path}')
-    return openings
 
 
 def _sample_stockfish_elo(rng: random.Random, ranges: list[list[int]]) -> int:
@@ -251,7 +236,6 @@ def _run_inference_worker(
                 results[pair_id] = event
                 progress.update(1)
 
-        # Surface a hard worker crash even if it could not send its error event.
         for pair_id, process in processes.items():
             if pair_id in results or process.exitcode is None:
                 continue
@@ -290,6 +274,7 @@ def run_stockfish_evaluation(
     logdir: str | None = None,
     checkpoint_path: str | None = None,
     onnx_checkpoint_path: str | None = None,
+    book_path: str | None = None,
 ) -> dict:
     if (logdir is None) == (onnx_checkpoint_path is None):
         raise ValueError('Choose exactly one model source: --logdir or --onnx')
@@ -308,10 +293,17 @@ def run_stockfish_evaluation(
     _validate_config(evaluation_config)
 
     config_dir = evaluation_config_path.parent
-    book_path = Path(evaluation_config.book_path).expanduser()
-    if not book_path.is_absolute():
-        book_path = (config_dir / book_path).resolve()
-    openings = _load_openings(book_path)
+    if book_path is not None:
+        resolved_book_path = Path(book_path).expanduser()
+        if not resolved_book_path.is_absolute():
+            resolved_book_path = resolved_book_path.resolve()
+    elif evaluation_config.book_path is not None:
+        resolved_book_path = Path(evaluation_config.book_path).expanduser()
+        if not resolved_book_path.is_absolute():
+            resolved_book_path = (config_dir / resolved_book_path).resolve()
+    else:
+        resolved_book_path = Path('book.csv').expanduser().resolve()
+    openings = load_openings(resolved_book_path)
 
     stockfish_path = evaluation_config.stockfish_path
     if '/' in stockfish_path or os.sep in stockfish_path:

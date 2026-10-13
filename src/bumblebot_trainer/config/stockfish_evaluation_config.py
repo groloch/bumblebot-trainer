@@ -4,9 +4,9 @@ from dataclasses import dataclass
 @dataclass
 class StockfishEvaluationConfig:
     stockfish_path: str
-    book_path: str
     num_game_pairs: int
     stockfish_elo_ranges: list[list[int]]
+    book_path: str | None = None
     num_workers: int = 4
     batch_size: int = 64
     batch_timeout_ms: float = 5.0
@@ -14,7 +14,6 @@ class StockfishEvaluationConfig:
     max_game_plies: int = 400
     seed: int = 42
     results_path: str | None = None
-    # Required for standalone ONNX checkpoints; logdir mode reads encoding from its run config.
     encoding: str | None = None
     onnx_tokens_input: str | None = None
     onnx_legal_input: str | None = None

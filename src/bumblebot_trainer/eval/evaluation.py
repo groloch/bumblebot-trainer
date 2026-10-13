@@ -30,7 +30,7 @@ class PuzzleEvaluator:
 
         self.dataset = LichessPuzzlesDataset(
             encoding,
-            num_puzzles=config.num_puzzles,
+            split='valid',
         )
         self.dataloader = DataLoader(
             self.dataset,

@@ -33,10 +33,7 @@ class MHA(nn.Module):
             num_heads: int,
             compressed_dim: int,
             smolgen_dim: int,
-            gen_dim: int,
-            use_legal_embeds: bool=False,
-            use_attacks_embeds: bool=False,
-            per_layer_posembeds: bool=False):
+            gen_dim: int):
         super().__init__()
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
         self.hidden_size = hidden_size
@@ -55,30 +52,14 @@ class MHA(nn.Module):
             num_heads=num_heads
         )
 
-        self.use_legal_embeds = use_legal_embeds
-        if use_legal_embeds:
-            self.qlegal = nn.Linear(64, hidden_size)
-
-        self.use_attacks_embeds = use_attacks_embeds
-        if use_attacks_embeds:
-            self.kattacks = nn.Linear(64, hidden_size)
-
-        self.per_layer_posembeds = per_layer_posembeds
-
     def forward(self, x: torch.Tensor, shared_gen: nn.Module, **kwargs) -> torch.Tensor:
         B, N, _ = x.shape
         qkv: torch.Tensor = self.qkv(x)
 
         q, k, v = qkv.chunk(3, dim=-1)
 
-        if self.use_legal_embeds:
-            q = q + self.qlegal(kwargs['legal'])
-        if self.use_attacks_embeds:
-            k = k + self.kattacks(kwargs['attacks'])
-
-        if self.per_layer_posembeds:
-            q = q + kwargs['pos_embeds']
-            k = k + kwargs['pos_embeds']
+        q = q + kwargs['pos_embeds']
+        k = k + kwargs['pos_embeds']
 
         q = q.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)

@@ -301,6 +301,8 @@ class SSLTrainer:
             extra = {k: v.to(self.device, non_blocking=True) for k, v in extra.items()}
             extra_ = {k: v.to(self.device, non_blocking=True) for k, v in extra_.items()}
 
+            extra['progress'] = step / self.training_config.max_steps
+
             # jepa-like forward pass
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():

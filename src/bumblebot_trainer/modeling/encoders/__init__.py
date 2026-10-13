@@ -2,11 +2,14 @@ from .encoder import Encoder, EncoderOutput, BertEncoder, CNNEncoder
 
 from .cf import CFEncoder
 
+from .cfc import CFCEncoder
+
 
 _encoder_mapping = {
     'bert': BertEncoder,
     'cnn': CNNEncoder,
     'cf': CFEncoder,
+    'cfc': CFCEncoder
 }
 
 

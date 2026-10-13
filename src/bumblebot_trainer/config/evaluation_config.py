@@ -6,7 +6,6 @@ class EvaluationConfig:
     every: int
     batch_size: int
     num_workers: int
-    num_puzzles: int
     elo_min: float
     elo_max: float
     elo_step: float

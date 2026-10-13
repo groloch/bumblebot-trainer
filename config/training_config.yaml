@@ -1,7 +1,7 @@
 type: "ssl"
 model:
   hidden_size: 256
-  encoder_name: "cf"
+  encoder_name: "cfc"
   encoder:
     num_layers: 16
     intermediate_size: 384
@@ -32,20 +32,19 @@ training:
   ssl_loss_weight: 0.5
   perceptive_loss_weight: 1.0
   dropout_schedule:
-    min_dropout: 0.2
-    max_dropout: 0.2
+    min_dropout: 0.4
+    max_dropout: 0.4
     convergence_rate: 0.1
     policy_accuracy_threshold: 0.8
     min_steps_between_updates: 50
 data:
   min_moves: 30
   max_prediction_depth: 10
-  encoding: 'legal'
+  encoding: 'simplified'
 evaluation:
-  every: 2500
+  every: 5000
   batch_size: 256
   num_workers: 8
-  num_puzzles: 100000
   prior_elo_mean: 1500.0
   prior_elo_std: 1000.0
   elo_min: 200.0

@@ -123,7 +123,7 @@ def build_model_config(model_config_dict: dict) -> ModelConfig:
     encoder_name = model_dict['encoder_name']
     encoder_kwargs = model_dict.pop('encoder')
 
-    if encoder_name == 'cf':
+    if encoder_name in ('cf', 'cfc'):
         encoder_config = CFEncoderConfig(hidden_size=hidden_size, **encoder_kwargs)
     else:
         encoder_config = EncoderConfig(hidden_size=hidden_size, **encoder_kwargs)

@@ -36,7 +36,7 @@ class SSLChessModel(nn.Module):
         )
         self.policy_head = PolicyHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.CrossEntropyLoss()
+            loss_fn=nn.CrossEntropyLoss(label_smoothing=0.2)
         )
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,

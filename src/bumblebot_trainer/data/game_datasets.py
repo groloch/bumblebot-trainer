@@ -272,11 +272,16 @@ class LichessPuzzlesDataset(PositionDataset):
     The dataset exposes one position per player move: item ``idx`` is the
     position in which the player has to find their ``move_idx``-th solution move.
     """
-    def __init__(self, encoding, num_puzzles: int = 100_000):
+    def __init__(self, encoding, split):
         super().__init__(encoding)
 
         self.dataset = load_dataset('Lichess/chess-puzzles', split='train')
-        num_puzzles = min(num_puzzles, len(self.dataset))
+        if split == 'valid':
+            selected = range(100_000)
+        elif split == 'train':
+            selected = range(1_000_000, 2_000_000)
+        else:
+            raise ValueError(f'LichessPuzzleDataset: split should be train or valid, received {split}')
 
         selected_themes = (
             # Move type
@@ -289,7 +294,7 @@ class LichessPuzzlesDataset(PositionDataset):
             ''
         )
 
-        self.dataset = self.dataset.select(range(num_puzzles)).map(
+        self.dataset = self.dataset.select(selected).map(
             lambda x: {
                 'fen': x['FEN'],
                 'moves': x['Moves'].split(' '),

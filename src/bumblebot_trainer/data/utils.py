@@ -110,6 +110,15 @@ def encode_board(
         tokens[:, 16] = board.halfmove_clock / 100.0
         if board.ep_square is not None:
             tokens[board.ep_square, 17] = 1.0
+
+        legal = torch.zeros(64, 64, dtype=torch.float32)
+        attacks = torch.zeros(64, 64, dtype=torch.float32)
+
+        # for move in board.legal_moves:
+        #     legal[move.from_square, move.to_square] = 1
+        # for to_square in range(64):
+        #     for from_square in board.attackers(not board.turn, to_square):
+        #         attacks[from_square, to_square] = 1
         return tokens, {}
 
     if encoding_type == 'legal':
