@@ -73,12 +73,12 @@ class PolicyHead(nn.Module):
 class ValueHead(nn.Module):
     """Simple MLP value head for chess position evaluation in expected win chance.
     """
-    def __init__(self, hidden_size: int, loss_fn: nn.Module):
+    def __init__(self, hidden_size: int, loss_fn: nn.Module, output_dim: int = 3):
         super().__init__()
         self.value_proj = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.SiLU(),
-            nn.Linear(hidden_size, 3)
+            nn.Linear(hidden_size, output_dim)
         )
 
         self.loss_fn = loss_fn

@@ -6,11 +6,17 @@ from .utils import load_config_file
 def main(config_path: str):
     config = load_config_file(config_path)
 
-    if config['type'] != 'ssl':
+    if config['type'] == 'ssl':
+        from .training import SSLTrainer
+        trainer = SSLTrainer(config, config_path)
+    elif config['type'] in ('pv', 'pv_finetune'):
+        from .training import PVTrainer
+        trainer = PVTrainer(config, config_path)
+    elif config['type'] == 'classification':
+        from .training import ClassificationTrainer
+        trainer = ClassificationTrainer(config, config_path)
+    else:
         raise ValueError(f"Unsupported training type: {config['type']}")
-
-    from .training import SSLTrainer
-    trainer = SSLTrainer(config, config_path)
 
     trainer.run()
     trainer.wrapup()

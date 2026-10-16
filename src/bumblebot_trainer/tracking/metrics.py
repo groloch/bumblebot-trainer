@@ -52,7 +52,7 @@ def multiclass_f1_from_confusion_matrix(confusion_matrix: torch.Tensor) -> torch
     f1_scores = torch.where(
         denom > 0,
         (2.0 * tp) / denom,
-        torch.ones_like(denom)
+        torch.zeros_like(denom)
     )
     return f1_scores.mean()
 
@@ -73,13 +73,23 @@ def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
     return accuracy.item()
 
 
+def _target_classes(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    if targets.shape == logits.shape:
+        return targets.argmax(dim=-1)
+
+    if targets.ndim == logits.ndim and targets.shape[-1] == 1:
+        targets = targets.squeeze(-1)
+
+    return targets.long()
+
+
 @torch.no_grad()
 def accuracy_stats(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    """Top-1 accuracy statistics for soft (probability) or hard targets.
+    """Top-1 accuracy statistics for soft (probability) or class-id targets.
     Returns a [correct, total] tensor that can be accumulated across steps.
     """
+    targets = _target_classes(logits, targets)
     predictions = logits.argmax(dim=-1)
-    targets = targets.argmax(dim=-1)
     correct = (predictions == targets).sum()
     total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
     return torch.stack([correct, total])
@@ -90,10 +100,10 @@ def topk_accuracy_stats(
         logits: torch.Tensor,
         targets: torch.Tensor,
         k: int = 3) -> torch.Tensor:
-    """Top-k accuracy statistics for soft (probability) or hard targets.
+    """Top-k accuracy statistics for soft (probability) or class-id targets.
     Returns a [correct, total] tensor that can be accumulated across steps.
     """
-    targets = targets.argmax(dim=-1, keepdim=True)
+    targets = _target_classes(logits, targets).unsqueeze(-1)
     correct = (logits.topk(k, dim=-1).indices == targets).any(dim=-1).sum()
     total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
     return torch.stack([correct, total])

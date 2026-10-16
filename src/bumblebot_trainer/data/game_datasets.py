@@ -5,7 +5,15 @@ import chess, chess.pgn
 from datasets import load_dataset, VerificationMode, Value
 
 from .position_datasets import PositionDataset
-from .utils import san_to_uci, process_item, VariationNode, parse_result, encode_board, get_move_id
+from .utils import (
+    san_to_uci,
+    process_item,
+    VariationNode,
+    parse_result,
+    encode_board,
+    get_move_id,
+    get_game_phase
+)
 
 
 class GamePositionDataset(PositionDataset):
@@ -172,8 +180,21 @@ class Lc0GamesDataset(GamePositionDataset):
 
 
 class T91GamesDataset(GamePositionDataset):
-    def __init__(self, min_moves: int, encoding: str):
+    TAGS = {
+        'all', 'winning', 'drawish', 'losing',
+        'opening', 'middlegame', 'endgame',
+        'tactical', 'strategical',
+    }
+
+    def __init__(
+            self,
+            min_moves: int,
+            encoding: str,
+            tag: str = 'all'):
         super().__init__(min_moves, encoding)
+        self.tag = tag.lower()
+        if self.tag not in self.TAGS:
+            raise ValueError(f'Unknown T91 position tag {tag!r}; expected one of {sorted(self.TAGS)}')
 
         # self.dataset = load_dataset(
         #     'groloch/lc0_training_T91_10m',
@@ -193,9 +214,7 @@ class T91GamesDataset(GamePositionDataset):
             num_proc=28
         )
 
-        self.games_lengths = np.cumsum(self.dataset['game_length'])
-        self.len = int(self.games_lengths[-1])
-
+        self.len = len(self.dataset)
         self.wdl_temp = 0.15
 
     def _get_nodes(self, board: chess.Board, game, position_idx: int):
@@ -210,55 +229,99 @@ class T91GamesDataset(GamePositionDataset):
             for move, percentage in zip(legal_moves, policy)
         ]
 
-    def _get_wdl(self, board: chess.Board, game, position_idx: int) -> float:
-        value = game['qvalues'][position_idx]
-        dvalue = game['dvalues'][position_idx]
+    @staticmethod
+    def _get_nearest_value(values, position_idx: int, field_name: str) -> float:
+        """Use the nearest available annotation if a position has a missing value."""
+        for distance in range(len(values)):
+            for candidate_idx in (position_idx - distance, position_idx + distance):
+                if 0 <= candidate_idx < len(values):
+                    value = values[candidate_idx]
+                    if value is not None and np.isfinite(value):
+                        return float(value)
+        raise ValueError(f'No non-null {field_name} annotation in this game')
 
-        if value is None:
-            i = 1
-            while value is None:
-                value = game['qvalues'][position_idx-i]
-                i+=1
-        if dvalue is None:
-            i = 1
-            while dvalue is None:
-                dvalue = game['qvalues'][position_idx-i]
-                i+=1
+    def _get_wdl(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
+        value = self._get_nearest_value(game['qvalues'], position_idx, 'qvalue')
+        dvalue = self._get_nearest_value(game['dvalues'], position_idx, 'dvalue')
 
-        if board.turn == chess.BLACK:
-            value = 1.0 - value
+        # qvalues are stored from White's perspective (prepare_data.py); convert
+        # to the side-to-move perspective before constructing the WDL target.
+        if turn == chess.BLACK:
+            value = -value
 
         win = (value + 1) / 2
-        draw = dvalue
-        loss = 1-win
-
-        wdl = torch.as_tensor([win, draw, loss], dtype=float)
+        loss = 1 - win
+        wdl = torch.as_tensor([win, dvalue, loss], dtype=torch.float)
         return (wdl / self.wdl_temp).softmax(dim=-1)
 
-    def __getitem__(self, idx):
-        game_idx = np.searchsorted(self.games_lengths, idx, side='right')
-        if game_idx == 0:
-            move_idx = idx
-        else:
-            move_idx = idx - self.games_lengths[game_idx - 1]
+    def _match_tags(self, board, policy, value):
+        if self.tag == 'all':
+            return True
+        if self.tag in ('winning', 'drawish', 'losing'):
+            valuemax = int(value.argmax().item())
+            if valuemax == 0:
+                return self.tag == 'winning'
+            elif valuemax == 1:
+                return self.tag == 'drawish'
+            else:
+                return self.tag == 'losing'
 
-        game = self.dataset[game_idx]
-        position_idx = self.min_moves + move_idx
+        elif self.tag in ('opening', 'middlegame', 'endgame'):
+            return self.tag == get_game_phase(board)
+
+        elif self.tag in ('tactical', 'strategical'):
+            max_probability_percent = np.max(policy) if len(policy) else 0.0
+            is_tactical = max_probability_percent > 60.0
+            return is_tactical if self.tag == 'tactical' else not is_tactical
+
+    def __getitem__(self, idx):
+        game = self.dataset[idx]
+        moves = game['movelist'].split()
         fen = game['fen'] if game['fen'] is not None else chess.STARTING_FEN
         board = chess.Board(fen, chess960=True)
 
-        for move in game['moves'][:position_idx]:
+        position_count = min(
+            len(moves),
+            len(game['policies']),
+            len(game['qvalues']),
+            len(game['dvalues']),
+        )
+        candidate_positions = list(range(self.min_moves, position_count))
+        if not candidate_positions:
+            raise ValueError(f'T91 game {idx} has no positions at/after min_moves={self.min_moves}')
+
+        if self.tag == 'all':
+            valid_positions = candidate_positions
+        else:
+            current_board = board.copy()
+            valid_positions = []
+            for position_idx, move in enumerate(moves[:position_count]):
+                if position_idx >= self.min_moves:
+                    policy = np.asarray(game['policies'][position_idx])
+                    value = self._get_wdl(current_board.turn, game, position_idx)
+                    if self._match_tags(current_board, policy, value):
+                        valid_positions.append(position_idx)
+                current_board.push_uci(move)
+
+        if not valid_positions:
+            valid_positions = candidate_positions
+
+        position_idx = int(np.random.choice(valid_positions))
+
+        for move in moves[:position_idx]:
             board.push_uci(move)
 
         nodes = self._get_nodes(board, game, position_idx)
         value = self._get_wdl(board, game, position_idx)
-        return process_item(
+        sample = process_item(
             board,
             nodes,
             self.encoding,
             self.temperature,
             value=value
         )
+        sample[1]['value_mask'] = torch.ones((), dtype=torch.float)
+        return sample
 
 
 class LichessPuzzlesDataset(PositionDataset):
@@ -274,12 +337,15 @@ class LichessPuzzlesDataset(PositionDataset):
     """
     def __init__(self, encoding, split):
         super().__init__(encoding)
+        if split not in ('train', 'valid'):
+            raise ValueError(f'LichessPuzzlesDataset: split should be train or valid, received {split}')
+        self.split = split
 
         self.dataset = load_dataset('Lichess/chess-puzzles', split='train')
         if split == 'valid':
             selected = range(100_000)
         elif split == 'train':
-            selected = range(1_000_000, 2_000_000)
+            selected = range(1_000_000, 6_000_000)
         else:
             raise ValueError(f'LichessPuzzleDataset: split should be train or valid, received {split}')
 
@@ -328,6 +394,18 @@ class LichessPuzzlesDataset(PositionDataset):
             board.push_uci(moves[k])
 
         uci_move = moves[2 * move_idx + 1]
+
+        if self.split == 'train':
+            return_value = torch.full((3,), 1 / 3, dtype=torch.float)
+            sample = process_item(
+                board,
+                [VariationNode(move=uci_move, probability=1.0)],
+                self.encoding,
+                self.temperature,
+                value=return_value,
+            )
+            sample[1]['value_mask'] = torch.zeros((), dtype=torch.float)
+            return sample
 
         board_, extra_ = encode_board(board, self.encoding)
         move_ = torch.tensor(

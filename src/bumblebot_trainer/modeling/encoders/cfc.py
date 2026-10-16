@@ -152,7 +152,7 @@ class EncoderLayer(nn.Module):
             shared_gen: nn.Module,
             layer_idx: int, **kwargs) -> torch.Tensor:
 
-        if self.training:
+        if self.training and kwargs.get('layer_dropout', True):
             selected_indices = self._select_indices(x, layer_idx, kwargs['progress'])
             if selected_indices.numel() == 0:
                 return x
@@ -192,9 +192,18 @@ class CFCEncoder(Encoder):
             torch.randn(ChessConstants.CONTEXT_LENGTH, config.hidden_size) * 0.02, requires_grad=True
         )
 
+        self.layer_dropout = True
+
     def forward(self, x: torch.Tensor, **kwargs) -> EncoderOutput:
 
         for i, layer in enumerate(self.layers):
-            x = layer(x, self.shared_gen, layer_idx=i, pos_embeds=self.shared_posembed, **kwargs)
+            x = layer(
+                x,
+                self.shared_gen,
+                layer_idx=i,
+                pos_embeds=self.shared_posembed,
+                layer_dropout=self.layer_dropout,
+                **kwargs
+            )
 
         return self._pack_output(x)

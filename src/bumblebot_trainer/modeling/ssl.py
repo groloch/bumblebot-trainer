@@ -19,7 +19,7 @@ class SSLChessModel(nn.Module):
     Policy is a lc0-style attention policy head.
     Value is a simple MLP regression head over the global (mean) embedding.
     """
-    def __init__(self, config: SSLModelConfig):
+    def __init__(self, config: SSLModelConfig, label_smoothing=0.2):
         super().__init__()
         self.config: SSLModelConfig = config
 
@@ -36,7 +36,7 @@ class SSLChessModel(nn.Module):
         )
         self.policy_head = PolicyHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.CrossEntropyLoss(label_smoothing=0.2)
+            loss_fn=nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         )
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,

@@ -155,7 +155,8 @@ def process_item(
             nodes: list[VariationNode],
             encoding: str,
             temperature: float = 0.1,
-            value: Optional[float | torch.Tensor] = None):
+            value: Optional[float | torch.Tensor] = None,
+            **kwargs):
         """Utility function for datasets that converts chess position
         into batchable model inputs.
         """
@@ -201,6 +202,8 @@ def process_item(
             'policy': policy_target,
             'value': value_target,
         }
+
+        extra = {**extra, **kwargs}
 
         return (
             tokens,

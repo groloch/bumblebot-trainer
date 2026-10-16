@@ -224,7 +224,7 @@ class SSLTrainer:
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            # shuffle=True,
+            shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth)
@@ -233,15 +233,15 @@ class SSLTrainer:
     def run(self):
         self.model.train()
         self.model.to(self.device)
-        torch.compile(self.model, mode='max-autotune')
+        # self.model.compile(mode='max-autotune')
 
         self.predictor.train()
         self.predictor.to(self.device)
-        torch.compile(self.predictor, mode='max-autotune')
+        self.predictor.compile(mode='max-autotune')
 
         self.teacher.eval()
         self.teacher.to(self.device)
-        torch.compile(self.teacher, mode='max-autotune')
+        self.teacher.compile(mode='max-autotune')
 
         print('Loading puzzle evaluation dataset')
         self.evaluator = PuzzleEvaluator(
