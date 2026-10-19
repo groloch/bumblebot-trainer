@@ -22,8 +22,8 @@ class ChessConstants:
     NUM_SQUARES = 64
 
 
-def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
-    """Converts position evaluation to win% (white's perspective) according to:
+def eval_to_playerwinpercent(cp: int, mate: int, magic=0.00368208):
+    """Converts position evaluation to win% (expected result) according to:
     https://lichess.org/page/accuracy
     """
     if mate is not None:
@@ -37,7 +37,7 @@ def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
     return max(min(winpercent, 100), 0)
 
 def whitewinpercent_to_cp(winpercent: float, magic=0.00368208):
-    """Converts an expected result in [0, 1] to centipawns using Lichess' curve."""
+    """Converts an expected result in [0, 1] to centipawns."""
     if winpercent <= 0:
         return -1000
     elif winpercent >= 1:

@@ -8,6 +8,9 @@ from ...utils import ChessConstants
 
 
 class FFN(nn.Module):
+    """Simple MLP FFN layer. Does not contain a gated activation since
+    https://arxiv.org/abs/2409.12272 did not find it to improve performances.
+    """
     def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
         self.hidden_size = hidden_size
@@ -29,6 +32,9 @@ class FFN(nn.Module):
 
 
 class MHA(nn.Module):
+    """Multi-head self attention with smolgen (geometric attention bias)
+    that uses flashattn
+    """
     def __init__(
             self,
             hidden_size: int,
@@ -82,6 +88,9 @@ class MHA(nn.Module):
 
 
 class Smolgen(nn.Module):
+    """Smolgen: geometric attention bias for chess modeling:
+    https://arxiv.org/abs/2409.12272
+    """
     def __init__(
             self,
             hidden_size: int,
@@ -113,6 +122,9 @@ class Smolgen(nn.Module):
 
 
 class EncoderLayer(nn.Module):
+    """Transformer encoder layer with smolgen and layer dropout as per:
+    https://arxiv.org/abs/2609.05275
+    """
     def __init__(
             self,
             hidden_size: int,
@@ -164,6 +176,8 @@ class EncoderLayer(nn.Module):
 
 
 class CFCEncoder(Encoder):
+    """ChessFormer encoder backbone with smolgen and layer dropout
+    """
     def __init__(self, config: CFEncoderConfig, **kwargs):
         super().__init__(config)
 

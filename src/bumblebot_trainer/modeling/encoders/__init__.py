@@ -1,4 +1,4 @@
-from .encoder import Encoder, EncoderOutput, BertEncoder, CNNEncoder
+from .encoder import EncoderOutput, Encoder, BertEncoder, CNNEncoder
 
 from .cf import CFEncoder
 

@@ -3,6 +3,10 @@ import torch
 import mlflow
 
 class AccumulationBuffer:
+    """Buffer containing a key-value data structure, with value being
+    stored on device for fast access without synchronizing function call.
+    Used mainly for storing metrics to average throughout gradient accumulation steps.
+    """
     def __init__(self, accumulation_steps, device, dtype=torch.bfloat16):
         self.accumulation_steps = accumulation_steps
         self.device = device
@@ -17,17 +21,21 @@ class AccumulationBuffer:
     def get_mean(self, name, ignore_zeros=False):
         if name not in self.buffers:
             return 0.0
-        buf = self.buffers[name]
+        buf: torch.Tensor = self.buffers[name]
         if ignore_zeros:
-            valid = buf[buf != 0]
+            valid: torch.Tensor = buf[buf != 0]
             return valid.mean().item() if valid.numel() > 0 else 0.0
         return buf.mean().item()
 
     def reset(self):
+        buf: torch.Tensor
         for buf in self.buffers.values():
             buf.zero_()
 
 class Meter:
+    """Object containing a sliding window of value for averaging
+    metrics over last steps.
+    """
     def __init__(self, fmt='{avg:.4e}', window_size=100):
         self.fmt = fmt
         self.window_size = window_size
@@ -45,6 +53,9 @@ class Meter:
         
 
 class MetricLogger:
+    """Utility object for streamlined metrics tracking, averaging and logging.
+    Currently only support mlflow for tracking.
+    """
     def __init__(self, use_mlflow):
         self.metrics = defaultdict(Meter)
         self.use_mlflow = use_mlflow

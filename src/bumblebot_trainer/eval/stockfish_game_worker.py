@@ -1,13 +1,12 @@
-"""Game-pair worker subprocess used by the standalone Stockfish evaluator."""
-
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
 import chess
 import chess.engine
 
-from ..data.utils import encode_board, get_game_phase
+from ..data.utils import get_game_phase
 from ..utils import get_move_id
+from .utils import encode_position
 
 
 def _configure_stockfish(stockfish_path: str, elo: int) -> chess.engine.SimpleEngine:
@@ -37,18 +36,13 @@ def _request_model_move(
     request_queue,
     response_queue,
 ) -> chess.Move:
-    encoded = encode_board(board, encoding)
-    if isinstance(encoded, tuple):
-        tokens, extra = encoded
-    else:
-        tokens, extra = encoded, {}
+    position = encode_position(board, encoding)
     legal_moves = list(board.legal_moves)
     legal_ids = [get_move_id(move, board.turn) for move in legal_moves]
 
     request_queue.put({
         'game_id': game_id,
-        'tokens': tokens.numpy(),
-        'extra': {key: value.numpy() for key, value in extra.items()},
+        **position,
         'legal_ids': legal_ids,
         'phase': get_game_phase(board),
     })

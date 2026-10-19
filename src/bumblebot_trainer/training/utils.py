@@ -12,6 +12,11 @@ from ..config import TrackingConfig
 from ..utils import build_model_config as build_runtime_model_config
 
 
+class Trainer:
+    def run(): ...
+    def wrapup(): ...
+
+
 def init_logdir(logdir: str, config_path: str) -> str:
     i = 0
     proposed_logdir = os.path.join(logdir, f'run_{i}')
@@ -41,7 +46,9 @@ def log_config(config: dict):
     mlflow.log_dict(config, 'config.json')
 
 
-def init_run(seed, tracking_config: TrackingConfig, config: dict | None = None):
+def init_run(seed, tracking_config: TrackingConfig, config: dict):
+    """Sets random seeds, creates the mlflow run and saves the config to it.
+    """
     if not(torch.cuda.is_available()):
         print("CUDA is not available. Exiting.")
         sys.exit(1)
@@ -54,8 +61,7 @@ def init_run(seed, tracking_config: TrackingConfig, config: dict | None = None):
         mlflow.set_tracking_uri(tracking_config.tracking_uri)
         mlflow.set_experiment(tracking_config.experiment_name)
         mlflow.start_run()
-        if config is not None:
-            log_config(config)
+        log_config(config)
 
 def model_parameters(model: torch.nn.Module):
     total_params = sum(p.numel() for p in model.parameters())
@@ -67,6 +73,11 @@ def build_model_config(config: dict):
     return build_runtime_model_config(config)
 
 def wsd_schedule(warmup_steps: int, max_steps: int):
+    """Warmup-stable-decay learning rate schedule.
+    Learning rate is warmed up for a set number of steps, then it stays constant
+    until 90% of the training is done, and it decays to 10% of the original
+    lr over the last 10% of the training.
+    """
     def schedule_lr(current_step: int):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
@@ -78,7 +89,9 @@ def wsd_schedule(warmup_steps: int, max_steps: int):
     return schedule_lr
 
 def dropout_schedule(min_dropout: float, max_dropout: float, convergence_rate: float):
-    """Exponential convergence schedule for dropout rate
+    """Exponential convergence schedule for predictor dropout rate.
+    The dropout exponentially converges from min to max with a set convergence rate to
+    control the convergence speed.
     """
     k = max_dropout - min_dropout
     def _schedule(step: int) -> float:

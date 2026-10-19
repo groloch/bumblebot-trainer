@@ -1,22 +1,15 @@
 from torch.utils.data import IterableDataset
-from datasets import load_dataset, VerificationMode
-from huggingface_hub import list_repo_tree
+from datasets import load_dataset
 import chess
 import numpy as np
 
-from .utils import process_item, VariationNode, san_to_uci
-
-
-def get_lichess_files_for_year(year: int) -> list[str]:
-    files = list_repo_tree(
-        'Lichess/standard-chess-games',
-        repo_type='dataset',
-        path_in_repo=f'data/year={year}',
-        recursive=True,
-    )
-    return sorted(
-        f.path for f in files if f.path.endswith('.parquet')
-    )
+from .utils import (
+    process_item,
+    VariationNode,
+    san_to_uci,
+    get_lichess_files_for_year,
+    WdlDataset
+)
 
 
 class IterablePositionDataset(IterableDataset):
@@ -78,57 +71,7 @@ class LichessStandardIterableDataset(IterablePositionDataset):
                 yield process_item(board, [node], self.encoding, self.temperature)
 
 
-class Lc0GamesIterableDataset(IterablePositionDataset):
-    """Lc0Games is a dataset of 170m games played by various versions of Leela Chess Zero
-     against itself.
-
-    This dataset is licensed under the odbl licence
-    """
-    def __init__(
-            self,
-            min_moves: int,
-            encoding: str,
-            shuffle_buffer_size: int = 10_000,
-            seed: int = 0
-        ):
-        super().__init__(encoding)
-
-        self.min_moves = min_moves
-
-        self.dataset = load_dataset(
-            'groloch/lc0_games',
-            split='train',
-            streaming=True
-        ).shuffle(seed=seed, buffer_size=shuffle_buffer_size)
-
-    def __iter__(self):
-        for item in self.dataset:
-            if item['variant'] != 'normal':
-                continue
-            moves = item['moves'].split()
-            game_length = len(moves) - self.min_moves
-
-            if game_length <= 0:
-                continue
-
-            board = chess.Board(item['start_fen'] or chess.STARTING_FEN, chess960=True)
-
-            for k in range(self.min_moves):
-                board.push(chess.Move.from_uci(moves[k]))
-
-            for move_idx in range(game_length):
-                uci_move = moves[self.min_moves+move_idx]
-                cp = None
-                mate = None
-
-                node = VariationNode(uci_move, cp=cp, mate=mate)
-
-                yield process_item(board, [node], self.encoding, self.temperature)
-
-                board.push(chess.Move.from_uci(uci_move))
-
-
-class T91GamesIterableDataset(IterablePositionDataset):
+class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
     """groloch/lc0_training_T91_10m is a dataset of 10m games played Leela Chess Zero
      against itself during its extended RL runs.
 
@@ -157,7 +100,7 @@ class T91GamesIterableDataset(IterablePositionDataset):
             split='train',
             streaming=True
         )
-        
+
         self.dataset = self.dataset.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
 
     def __iter__(self):
@@ -182,17 +125,6 @@ class T91GamesIterableDataset(IterablePositionDataset):
                 if len(legal_moves) != len(policy):
                     raise ValueError('T91 policy length does not match the number of legal moves')
 
-                nodes = [
-                    VariationNode(move=move, probability=percentage/100.0)
-                    for move, percentage in zip(legal_moves, policy)
-                ]
-
-                qvalue = float(item['qvalues'][move_idx])
-                dvalue = float(item['dvalues'][move_idx]) # TODO use
-                value = qvalue
-
-                if board.turn == chess.BLACK:
-                    value = 1.0 - value
-
-                value = min(max(value, 0.0), 1.0)
+                nodes = self._get_nodes(board, item, move_idx)
+                value = self._get_wdl(board, item, move_idx)
                 return process_item(board, nodes, self.encoding, self.temperature, value=value)

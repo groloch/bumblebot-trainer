@@ -1,11 +1,12 @@
-import sys
 import regex as re
 from dataclasses import dataclass
 
 import torch
 import chess
+from huggingface_hub import list_repo_tree
+import numpy as np
 
-from ..utils import eval_to_whitewinpercent, get_move_id, ChessConstants
+from ..utils import eval_to_playerwinpercent, get_move_id, ChessConstants
 
 from typing import Literal, Optional
 
@@ -16,12 +17,59 @@ class VariationNode:
     Any one of cp, mate, expected_result or probability should be provided.
     See process_item for more details on how these are used.
     """
-
     move: str
     cp: Optional[int] = None
     mate: Optional[int] = None
     expected_result: Optional[float] = None
     probability: Optional[float] = None
+
+
+class WdlDataset:
+    """Utility function for datasets that have wdl value annotations
+    """
+    def __init__(self):
+        self.wdl_temp = 0.15
+
+    def _get_nodes(self, board: chess.Board, game, position_idx: int):
+        legal_moves = sorted(move.uci() for move in board.legal_moves)
+        policy = game['policies'][position_idx]
+
+        if len(legal_moves) != len(policy):
+            raise ValueError('Policy length does not match the number of legal moves')
+
+        return [
+            VariationNode(move=move, probability=percentage/100.0)
+            for move, percentage in zip(legal_moves, policy)
+        ]
+
+    def _get_nearest_value(self, values, position_idx: int) -> float:
+        """Some of the positions in the dataset do not have value targets, so we
+        get the closest existing value in the game.
+        Since missing value targets are rare and sparse, this workaround is a good
+        approximation of the actual value of the position.
+        """
+        for distance in range(len(values)):
+            for candidate_idx in (position_idx - distance, position_idx + distance):
+                if 0 <= candidate_idx < len(values):
+                    value = values[candidate_idx]
+                    if value is not None and np.isfinite(value):
+                        return float(value)
+        return 0.5
+
+    def _get_wdl(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
+        """Converts expected result (from the player to play's perspective) and expected
+        draw chances to wdl targets.
+        """
+        value = self._get_nearest_value(game['qvalues'], position_idx)
+        dvalue = self._get_nearest_value(game['dvalues'], position_idx)
+
+        if turn == chess.BLACK:
+            value = 1-value
+
+        win = (value + 1) / 2
+        loss = 1 - win
+        wdl = torch.as_tensor([win, dvalue, loss], dtype=torch.float)
+        return (wdl / self.wdl_temp).softmax(dim=-1)
 
 
 def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = True) -> list[str]:
@@ -44,7 +92,11 @@ def encode_board(
         board: chess.Board,
         encoding_type: Literal['simplified', 'lc0'] = 'simplified'
         ) -> torch.Tensor:
-    """Encodes a board state into tokens for the specified encoding type
+    """Encodes a board state into tokens for the specified encoding type.
+    Supports:
+    - lc0 encoding: 112 planes, 8-plies move history with information on repetitions
+    - simplified: 18 planes, only current position information
+    - legal: 18+64 planes, same as simplified but also contains information over legal moves
     """
     black_turn = False
     if board.turn == chess.BLACK:
@@ -151,65 +203,65 @@ def encode_board(
     return None
 
 def process_item(
-            board: chess.Board,
-            nodes: list[VariationNode],
-            encoding: str,
-            temperature: float = 0.1,
-            value: Optional[float | torch.Tensor] = None,
-            **kwargs):
-        """Utility function for datasets that converts chess position
-        into batchable model inputs.
-        """
-        tokens, extra = encode_board(board, encoding)
+        board: chess.Board,
+        nodes: list[VariationNode],
+        encoding: str,
+        temperature: float = 0.1,
+        value: Optional[float | torch.Tensor] = None,
+        **kwargs):
+    """Utility function for datasets that converts chess position
+    into batchable model inputs.
+    """
+    tokens, extra = encode_board(board, encoding)
 
-        indices = torch.zeros((len(nodes),), dtype=torch.long)
-        evals = torch.zeros((len(nodes),), dtype=torch.float)
+    indices = torch.zeros((len(nodes),), dtype=torch.long)
+    evals = torch.zeros((len(nodes),), dtype=torch.float)
 
-        does_reweight = all(node.probability is None for node in nodes)
+    does_reweight = all(node.probability is None for node in nodes)
 
-        for i, node in enumerate(nodes):
-            if node.probability is not None:
-                expected_result = node.probability
-            elif node.expected_result is not None:
-                expected_result = node.expected_result
-            else:
-                winpercent = eval_to_whitewinpercent(node.cp, node.mate)
-                if board.turn == chess.BLACK and winpercent != -100:
-                    winpercent = 100.0 - winpercent
-                expected_result = winpercent / 100.0
-
-            indices[i] = get_move_id(chess.Move.from_uci(node.move), board.turn)
-            evals[i] = expected_result
-
-        policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
-        policy_target[indices] = evals
-
-        if does_reweight:
-            policy_target = policy_target / temperature
-            policy_target = torch.softmax(policy_target, dim=-1)
+    for i, node in enumerate(nodes):
+        if node.probability is not None:
+            expected_result = node.probability
+        elif node.expected_result is not None:
+            expected_result = node.expected_result
         else:
-            policy_target = policy_target.nan_to_num(neginf=0)
+            winpercent = eval_to_playerwinpercent(node.cp, node.mate)
+            if board.turn == chess.BLACK and winpercent != -100:
+                winpercent = 100.0 - winpercent
+            expected_result = winpercent / 100.0
 
-        if value is not None:
-            if isinstance(value, torch.Tensor):
-                value_target = value
-            else:
-                value_target = torch.tensor(value)
+        indices[i] = get_move_id(chess.Move.from_uci(node.move), board.turn)
+        evals[i] = expected_result
+
+    policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
+    policy_target[indices] = evals
+
+    if does_reweight:
+        policy_target = policy_target / temperature
+        policy_target = torch.softmax(policy_target, dim=-1)
+    else:
+        policy_target = policy_target.nan_to_num(neginf=0)
+
+    if value is not None:
+        if isinstance(value, torch.Tensor):
+            value_target = value
         else:
-            value_target = torch.max(evals)
+            value_target = torch.tensor(value)
+    else:
+        value_target = torch.max(evals)
 
-        target_dict = {
-            'policy': policy_target,
-            'value': value_target,
-        }
+    target_dict = {
+        'policy': policy_target,
+        'value': value_target,
+    }
 
-        extra = {**extra, **kwargs}
+    extra = {**extra, **kwargs}
 
-        return (
-            tokens,
-            target_dict,
-            extra
-        )
+    return (
+        tokens,
+        target_dict,
+        extra
+    )
 
 def _backrank_sparse(board: chess.Board) -> bool:
     first_rank = 0xFF
@@ -311,7 +363,7 @@ def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']) -> int:
     Black wins: -1
 
     Args:
-        result_str (str): a string representing a chess game result in san notation 
+        result_str (str): a string representing a chess game result in san notation
 
     Raises:
         ValueError: if the result is not parsable because of wrong format
@@ -332,3 +384,16 @@ def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']) -> int:
             return 0
         case _:
             raise ValueError(f'Unable to parse chess game result {result_str}')
+
+def get_lichess_files_for_year(year: int) -> list[str]:
+    """Utility function to fetch yearly data from lichess' standard chess games dataset
+    """
+    files = list_repo_tree(
+        'Lichess/standard-chess-games',
+        repo_type='dataset',
+        path_in_repo=f'data/year={year}',
+        recursive=True,
+    )
+    return sorted(
+        f.path for f in files if f.path.endswith('.parquet')
+    )

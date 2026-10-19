@@ -5,6 +5,8 @@ from .heads import ValueHead
 
 
 class PositionClassificationHeads(nn.Module):
+    """Classification module to add to an encoder for expert routing.
+    """
     ACTIVITY_CLASSES = ('strategical', 'tactical')
     EVALUATION_CLASSES = ('winning', 'drawing', 'losing')
 

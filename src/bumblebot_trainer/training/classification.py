@@ -18,10 +18,15 @@ from ..tracking.metrics import (
     multiclass_confusion_matrix,
     multiclass_f1_from_confusion_matrix,
 )
-from .utils import init_logdir, init_run, wsd_schedule
+from .utils import init_logdir, init_run, wsd_schedule, Trainer
 
 
-class ClassificationTrainer:
+class ClassificationTrainer(Trainer):
+    """Trainer that trains expert routing heads on top of a pre-trained model backbone.
+    Currently adapted to two experts groups:
+    - activity: tactical or strategical position classification
+    - evaluation: winning or drawish or losing position
+    """
     def __init__(self, config, config_path):
         raw_config = copy.deepcopy(config)
         self.training_config = config['training']

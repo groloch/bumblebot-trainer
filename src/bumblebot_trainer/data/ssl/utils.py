@@ -2,9 +2,6 @@ import torch
 import chess
 
 from ..utils import encode_board, VariationNode, process_item
-from ...utils import ChessConstants
-
-from typing import Literal
 
 
 class SSLConstants:
@@ -92,51 +89,15 @@ def encode_move_for_predictor(
     )
     return move_encoded
 
-def apply_td_value(
-        color,
-        advancement,
-        result,
-        smoothing: Literal['linear', 'quadratic', 'cubic'] = 'quadratic'):
-    """Temporal difference formula applied to the game result to get the intermediate
-    expected result at some move.
-    It is a smoothing from draw expected (startpos) to the actual result of the game
-    based on the advancement.
-
-    Args:
-        color (bool): current side to play
-        advancement (float): current advancement of the game (moves played / total number of moves)
-        result (int): result of the game (1: white wins, 0: draw, -1: black wins)
-        smoothing (str): smoothing to apply
-
-    Returns:
-        float: expected result from the side to move perspective, in [0, 1]
-    """
-    prob = (result + 1) / 2
-
-    def scale_a(a):
-        match smoothing:
-            case 'linear':
-                return a
-            case 'quadratic':
-                return a ** 2
-            case 'cubic':
-                return a ** 3
-    advancement_scaled = scale_a(advancement)
-
-    value = 0.5 * (1 - advancement_scaled) + prob * advancement_scaled
-
-    # process_item expects targets from the side-to-move perspective
-    if color == chess.BLACK:
-        value = 1.0 - value
-
-    return value
-
 def encode_move_sequence(
         board: chess.Board,
         movelist: list[str],
         start_idx: int,
         end_idx: int
     ):
+    """Encodes a sequence of moves in uci format into a predictor input (6 tokens per move). See
+    encode_move_for_predictor for more info on the encoding used for each moves.
+    """
     moves = torch.zeros((end_idx - start_idx, SSLConstants.NUM_TOKENS_PER_MOVE), dtype=torch.long)
     board_ = board.copy()
 
@@ -178,6 +139,10 @@ def encode_both_boards(
         value: float | torch.Tensor | None = None,
         value_: float | torch.Tensor | None = None
     ):
+    """Pre-processed a position and a list of moves for ssl training.
+    Returns the encoded boards (current and after the move sequence), and the
+    encoded move sequence (6 tokens per move). Also returns the policy and value targets.
+    """
     tokens, targets, extra = process_item(board, nodes, encoding, value=value)
     movelist_, board_ = encode_move_sequence(
         board=board,

@@ -62,4 +62,6 @@ class BertEncoder(Encoder):
 
 
 class CNNEncoder(Encoder):
+    """N/I (initially intended for comparison purposes)
+    """
     pass

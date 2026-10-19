@@ -26,7 +26,6 @@ def ssl_to_pv_model(ssl_model):
         encoder_config = ssl_model.config.encoder_config
     )
 
-
     pv_model = ChessModel(model_config)
 
     pv_model.encoder.load_state_dict(ssl_model.encoder.state_dict().copy())

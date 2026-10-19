@@ -126,6 +126,8 @@ def _add_optional_metadata(writer, config: dict, config_path: Path, ckpt_path: P
 
 
 def export_run_to_gguf(logdir: str, output_path: str | None = None, checkpoint_path: str | None = None):
+    """Exports a model to a gguf file for use in a chess engine that supports a gguf backend.
+    """
     logdir_path = Path(logdir)
     if not logdir_path.exists():
         raise FileNotFoundError(f'Logdir not found: {logdir_path}')

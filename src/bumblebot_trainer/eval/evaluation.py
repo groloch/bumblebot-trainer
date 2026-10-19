@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import mlflow
-from torch.utils.data import DataLoader, default_collate
+from torch.utils.data import default_collate
 from tqdm import tqdm
 
 from ..config import EvaluationConfig
@@ -14,6 +14,12 @@ from ..data.game_datasets import LichessPuzzlesDataset
 from ..data.position_datasets import LichessEvalDataset
 from ..utils import expected_result_to_cp, wdl_to_expected_result
 from .bayes_elo import bayes_elo
+from .utils import (
+    autocast,
+    get_model_embeddings,
+    make_dataloader,
+    preserve_model_mode,
+)
 
 
 GAME_PHASES = ('opening', 'middlegame', 'endgame')
@@ -40,6 +46,13 @@ def _mean_or_zero(total: float, count: int) -> float:
 
 
 class PuzzleEvaluator:
+    """Evaluation on puzzles from lichess.
+
+    Evaluates elo, move accuracy, solved rate (solving a puzzle requires several best moves to be
+    found, this is therefore different than move accuracy), confidence (best move predicted prob).
+
+    Also measures those metrics by-theme (see LichessPuzzlesDataset for the selected themes).
+    """
     def __init__(
         self,
         model: nn.Module,
@@ -47,7 +60,7 @@ class PuzzleEvaluator:
         encoding: str,
         device: torch.device,
         use_mlflow: bool,
-        logdir: str,
+        logdir: str = '',
     ):
         self.model = model
         self.config = config
@@ -56,14 +69,8 @@ class PuzzleEvaluator:
         self.logdir = logdir
 
         self.dataset = LichessPuzzlesDataset(encoding, split='valid')
-        self.dataloader = DataLoader(
-            self.dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            pin_memory=device.type == 'cuda',
-            drop_last=False,
-            collate_fn=_collate_puzzle_batch,
+        self.dataloader = make_dataloader(
+            self.dataset, config, device, collate_fn=_collate_puzzle_batch
         )
 
         self.puzzle_lens = self.dataset.puzzle_lens
@@ -71,14 +78,12 @@ class PuzzleEvaluator:
         self.tag_names = self.dataset.TAGS
 
     def _policy_logits(self, tokens: torch.Tensor, **kwargs) -> torch.Tensor:
-        squares_embeddings, _ = self.model.embed(tokens, **kwargs)
-        return self.model.policy_head(squares_embeddings, None).logits
+        squares, _ = get_model_embeddings(self.model, tokens, kwargs)
+        return self.model.policy_head(squares, None).logits
 
     @torch.no_grad()
+    @preserve_model_mode
     def run(self, step: int) -> dict[str, float]:
-        was_training = self.model.training
-        self.model.eval()
-
         n = self.num_puzzles
         correct_per_puzzle = np.zeros(n, dtype=np.float64)
         total_per_puzzle = np.zeros(n, dtype=np.int64)
@@ -94,7 +99,6 @@ class PuzzleEvaluator:
 
         n_positions = 0
         n_correct = 0
-        use_autocast = self.device.type == 'cuda'
 
         pbar = tqdm(self.dataloader, desc='Solving puzzles', leave=False)
         for (
@@ -116,11 +120,7 @@ class PuzzleEvaluator:
             ratings_np = ratings.numpy()
             tag_masks_np = tag_masks.numpy()
 
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=torch.bfloat16,
-                enabled=use_autocast,
-            ):
+            with autocast(self.device):
                 logits = self._policy_logits(tokens, **extra)
 
             probabilities = torch.softmax(logits.float(), dim=-1)
@@ -161,8 +161,6 @@ class PuzzleEvaluator:
 
             pbar.set_postfix(accuracy=f'{n_correct / max(n_positions, 1):.3f}')
 
-        self.model.train(was_training)
-
         fully_evaluated = total_per_puzzle == self.puzzle_lens
         solved = fully_evaluated & (correct_per_puzzle >= total_per_puzzle)
         evaluated = total_per_puzzle > 0
@@ -195,9 +193,7 @@ class PuzzleEvaluator:
         metrics = {
             'puzzle/elo': float(elo),
             'puzzle/elo_std': float(elo_std),
-            'puzzle/accuracy': n_correct / max(n_positions, 1),
-            'puzzle/solved': float(solved_count),
-            'puzzle/missed': float(evaluated_count - solved_count),
+            'puzzle/move_accuracy': n_correct / max(n_positions, 1),
             'puzzle/solved_rate': solved_count / max(evaluated_count, 1),
             'puzzle/confidence': _mean_or_zero(confidence_sum, confidence_count),
         }
@@ -207,8 +203,6 @@ class PuzzleEvaluator:
             tag_solved = int((solved & tagged).sum())
             tag_count = int(tagged.sum())
             prefix = f'puzzle/tag/{tag}'
-            metrics[f'{prefix}/solved'] = float(tag_solved)
-            metrics[f'{prefix}/missed'] = float(tag_count - tag_solved)
             metrics[f'{prefix}/solved_rate'] = tag_solved / max(tag_count, 1)
             tag_elo, tag_elo_std = grouped_elo(tagged)
             metrics[f'{prefix}/elo'] = float(tag_elo)
@@ -224,8 +218,6 @@ class PuzzleEvaluator:
             bucket_solved = int((solved & in_bucket).sum())
             bucket_count = int(in_bucket.sum())
             prefix = f'puzzle/elo_range/{bucket}-{bucket + 499}'
-            metrics[f'{prefix}/solved'] = float(bucket_solved)
-            metrics[f'{prefix}/missed'] = float(bucket_count - bucket_solved)
             metrics[f'{prefix}/solved_rate'] = bucket_solved / max(bucket_count, 1)
             metrics[f'{prefix}/confidence'] = _mean_or_zero(
                 confidence_sum_per_elo[int(bucket)],
@@ -239,7 +231,11 @@ class PuzzleEvaluator:
 
 
 class StockfishEvaluator:
-    ACTIVITY_THRESHOLD = 0.6
+    """Evaluation on stockfish annotated positions (LichessEval datasets).
+    Evaluates top-1 and top-3 accuracy, kl divergence, and confidence on the top-1 move.
+
+    Also measures those metrics per-game-phase
+    """
     TOP_K = 3
 
     def __init__(
@@ -249,29 +245,19 @@ class StockfishEvaluator:
         encoding: str,
         device: torch.device,
         use_mlflow: bool,
-        logdir: str,
+        logdir: str = '',
     ):
         self.model = model
-        self.config = config
         self.device = device
         self.use_mlflow = use_mlflow
         self.logdir = logdir
 
-        self.dataset = LichessEvalDataset(encoding)
-        self.dataloader = DataLoader(
-            self.dataset,
-            batch_size=config.batch_size,
-            shuffle=False,
-            num_workers=config.num_workers,
-            pin_memory=device.type == 'cuda',
-            drop_last=False,
-        )
+        self.dataset = LichessEvalDataset(encoding, split='valid')
+        self.dataloader = make_dataloader(self.dataset, config, device)
 
     @torch.no_grad()
+    @preserve_model_mode
     def run(self, step: int) -> dict[str, float]:
-        was_training = self.model.training
-        self.model.eval()
-
         stats = defaultdict(lambda: {
             'count': 0,
             'correct': 0,
@@ -286,7 +272,6 @@ class StockfishEvaluator:
             getattr(self.model.value_head, 'loss_fn', None),
             nn.CrossEntropyLoss,
         )
-        use_autocast = self.device.type == 'cuda'
 
         def accumulate_policy_stats(name, mask, correct, topk_correct, kl, target_confidence):
             count = int(mask.sum().item())
@@ -305,24 +290,9 @@ class StockfishEvaluator:
             targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
             extra = {k: v.to(self.device, non_blocking=True) for k, v in extra.items()}
 
-            with torch.autocast(
-                device_type=self.device.type,
-                dtype=torch.bfloat16,
-                enabled=use_autocast,
-            ):
-                embeddings = self.model.embed(tokens, **extra)
-                if hasattr(embeddings, 'squares_embeddings'):
-                    squares_embeddings = embeddings.squares_embeddings
-                    value_embedding = embeddings.cls_embedding
-                elif isinstance(embeddings, tuple):
-                    squares_embeddings = embeddings[0]
-                    value_embedding = squares_embeddings.mean(dim=1)
-                else:
-                    raise TypeError(
-                        f'Unsupported model embed output: {type(embeddings).__name__}'
-                    )
-
-                policy_logits = self.model.policy_head(squares_embeddings, None).logits
+            with autocast(self.device):
+                squares, value_embedding = get_model_embeddings(self.model, tokens, extra)
+                policy_logits = self.model.policy_head(squares, None).logits
                 value_output = self.model.value_head(value_embedding, None).logits
 
             policy_targets = targets['policy'].float()
@@ -364,14 +334,6 @@ class StockfishEvaluator:
                     target_confidence,
                 )
 
-            for activity, mask in (
-                ('tactical', target_confidence >= self.ACTIVITY_THRESHOLD),
-                ('strategical', target_confidence < self.ACTIVITY_THRESHOLD),
-            ):
-                accumulate_policy_stats(
-                    f'activity/{activity}', mask, correct, topk_correct, kl, target_confidence
-                )
-
             predicted_expected_result = wdl_to_expected_result(
                 value_output,
                 from_logits=value_from_logits,
@@ -389,8 +351,6 @@ class StockfishEvaluator:
             )
             cp_loss_sum += float((predicted_cp - stockfish_cp).abs().sum().item())
             value_count += int(target_expected_result.numel())
-
-        self.model.train(was_training)
 
         metrics: dict[str, float] = {}
         for name, group in stats.items():
@@ -452,10 +412,8 @@ def run_evaluation_suite(
     logdir: str = '',
     step: int = 0,
 ) -> dict[str, dict[str, float]]:
-    """Run puzzle and Stockfish-position evaluation on an initialized model."""
-    return EvaluationSuite(
-        model, config, encoding, device, use_mlflow, logdir
-    ).run(step)
+    """Run puzzle and Stockfish-position evaluation on an existing model."""
+    return EvaluationSuite(model, config, encoding, device, use_mlflow, logdir).run(step)
 
 
 def run_evaluation_suite_from_logdir(

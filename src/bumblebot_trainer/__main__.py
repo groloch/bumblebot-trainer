@@ -1,23 +1,26 @@
+import argparse
 import sys
 
 from .utils import load_config_file
 
 
+COMMANDS = {'evaluate', 'tournament', 'stockfish-eval', 'export'}
+
+
 def main(config_path: str):
     config = load_config_file(config_path)
+    training_type = config['type']
+    from .training import Trainer, SSLTrainer, PVTrainer, ClassificationTrainer
+    trainers: dict[str, type[Trainer]] = {
+        'ssl': SSLTrainer,
+        'pv': PVTrainer,
+        'pv_finetune': PVTrainer,
+        'classification': ClassificationTrainer,
+    }
+    if training_type not in trainers:
+        raise ValueError(f'Unsupported training type: {training_type}')
 
-    if config['type'] == 'ssl':
-        from .training import SSLTrainer
-        trainer = SSLTrainer(config, config_path)
-    elif config['type'] in ('pv', 'pv_finetune'):
-        from .training import PVTrainer
-        trainer = PVTrainer(config, config_path)
-    elif config['type'] == 'classification':
-        from .training import ClassificationTrainer
-        trainer = ClassificationTrainer(config, config_path)
-    else:
-        raise ValueError(f"Unsupported training type: {config['type']}")
-
+    trainer = trainers[training_type](config, config_path)
     trainer.run()
     trainer.wrapup()
 
@@ -30,6 +33,7 @@ def evaluation_main(
     step: int = 0,
 ):
     from .eval import run_evaluation_suite_from_logdir
+
     return run_evaluation_suite_from_logdir(
         logdir,
         checkpoint_path=checkpoint_path,
@@ -47,6 +51,7 @@ def stockfish_eval_main(
     book_path: str | None = None,
 ):
     from .eval.stockfish_evaluation import run_stockfish_evaluation
+
     return run_stockfish_evaluation(
         evaluation_config_path,
         logdir=logdir,
@@ -58,6 +63,7 @@ def stockfish_eval_main(
 
 def export_main(logdir: str, output_path: str | None = None, checkpoint_path: str | None = None):
     from .export import export_run_to_gguf
+
     export_run_to_gguf(logdir, output_path=output_path, checkpoint_path=checkpoint_path)
 
 
@@ -68,174 +74,107 @@ def tournament_main(
     book_path: str | None = None,
 ):
     from .eval.tournament_evaluation import run_tournament
+
     return run_tournament(tournament_config_path, logdirs=logdirs, book_path=book_path)
 
 
-if __name__ == '__main__':
-    if len(sys.argv) >= 2 and sys.argv[1] == 'evaluate':
-        args = sys.argv[2:]
-        logdir = None
-        checkpoint_path = None
-        step = 0
-        use_mlflow = False
-        index = 0
-        while index < len(args):
-            argument = args[index]
-            if argument == '--mlflow':
-                use_mlflow = True
-                index += 1
-                continue
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='python -m bumblebot_trainer',
+        description='Train Bumblebot models or run model evaluation tools.',
+    )
+    commands = parser.add_subparsers(dest='command', required=True)
 
-            if argument.startswith('--'):
-                if index + 1 >= len(args):
-                    print(f'Missing value after {argument}')
-                    sys.exit(1)
-                value = args[index + 1]
-                if argument == '--logdir':
-                    if logdir is not None:
-                        print('--logdir may only be specified once')
-                        sys.exit(1)
-                    logdir = value
-                elif argument == '--checkpoint':
-                    if checkpoint_path is not None:
-                        print('--checkpoint may only be specified once')
-                        sys.exit(1)
-                    checkpoint_path = value
-                elif argument == '--step':
-                    step = int(value)
-                else:
-                    print(f'Unknown evaluate option: {argument}')
-                    sys.exit(1)
-                index += 2
-            else:
-                print(f'Unexpected evaluate argument: {argument}')
-                sys.exit(1)
+    evaluate = commands.add_parser(
+        'evaluate', help='Evaluate a run on puzzle and Stockfish positions'
+    )
+    evaluate.add_argument('--logdir', required=True, help='Training run directory')
+    evaluate.add_argument(
+        '--checkpoint', help='Checkpoint path (defaults to the latest checkpoint)'
+    )
+    evaluate.add_argument('--step', type=int, default=0, help='MLflow metric step')
+    evaluate.add_argument('--mlflow', action='store_true', help='Log metrics to MLflow')
 
-        if logdir is None:
-            print('Usage: python -m bumblebot_trainer evaluate --logdir <run_dir> [--checkpoint <checkpoint.pth>] [--step N] [--mlflow]')
-            sys.exit(1)
+    tournament = commands.add_parser('tournament', help='Run an all-against-all tournament')
+    tournament.add_argument('config', help='Tournament YAML config')
+    tournament.add_argument(
+        '--logdir', action='append', default=[], help='Additional participant run directory'
+    )
+    tournament.add_argument('--book', help='Opening book CSV')
+
+    stockfish = commands.add_parser(
+        'stockfish-eval', help='Play paired games against Stockfish'
+    )
+    stockfish.add_argument(
+        'evaluation_config', nargs='?', help='Stockfish evaluation YAML config'
+    )
+    source = stockfish.add_mutually_exclusive_group()
+    source.add_argument('--logdir', help='Training run directory')
+    source.add_argument('--onnx', help='Standalone ONNX policy checkpoint')
+    source.add_argument(
+        '--consortium', metavar='CONFIG', help='Evaluation config containing a consortium'
+    )
+    stockfish.add_argument(
+        'checkpoint', nargs='?', help='Optional PyTorch checkpoint (with --logdir)'
+    )
+    stockfish.add_argument(
+        '--checkpoint', dest='checkpoint_option', help='PyTorch checkpoint override'
+    )
+    stockfish.add_argument('--book', help='Opening book CSV')
+
+    export = commands.add_parser('export', help='Export a training run to GGUF')
+    export.add_argument('logdir', help='Training run directory')
+    export.add_argument('output_path', nargs='?', help='Output GGUF path')
+    export.add_argument('checkpoint', nargs='?', help='Checkpoint path')
+    return parser
+
+
+def _run_command(args: argparse.Namespace) -> None:
+    if args.command == 'evaluate':
         evaluation_main(
-            logdir,
-            checkpoint_path=checkpoint_path,
-            use_mlflow=use_mlflow,
-            step=step,
+            args.logdir,
+            checkpoint_path=args.checkpoint,
+            use_mlflow=args.mlflow,
+            step=args.step,
         )
-    elif len(sys.argv) >= 2 and sys.argv[1] == 'tournament':
-        args = sys.argv[2:]
-        positional_args = []
-        logdirs = []
-        book_path = None
-        index = 0
-        while index < len(args):
-            argument = args[index]
-            if argument in ('--logdir', '--book'):
-                if index + 1 >= len(args):
-                    print(f'Missing path after {argument}')
-                    sys.exit(1)
-                if argument == '--logdir':
-                    logdirs.append(args[index + 1])
-                else:
-                    if book_path is not None:
-                        print('--book may only be specified once')
-                        sys.exit(1)
-                    book_path = args[index + 1]
-                index += 2
-            elif argument.startswith('--logdir='):
-                logdir = argument.partition('=')[2]
-                if not logdir:
-                    print('Missing path after --logdir=')
-                    sys.exit(1)
-                logdirs.append(logdir)
-                index += 1
-            elif argument.startswith('--book='):
-                if book_path is not None:
-                    print('--book may only be specified once')
-                    sys.exit(1)
-                book_path = argument.partition('=')[2]
-                if not book_path:
-                    print('Missing path after --book=')
-                    sys.exit(1)
-                index += 1
-            else:
-                positional_args.append(argument)
-                index += 1
-
-        if len(positional_args) != 1:
-            print('Usage:')
-            print('  python -m bumblebot_trainer tournament <tournament_config.yaml> [--logdir <run_dir> ...] [--book <book.csv>]')
-            sys.exit(1)
-        tournament_main(positional_args[0], logdirs=logdirs, book_path=book_path)
-    elif len(sys.argv) >= 2 and sys.argv[1] == 'stockfish-eval':
-        args = sys.argv[2:]
-        book_path = None
-        positional_args = []
-        index = 0
-        while index < len(args):
-            argument = args[index]
-            if argument == '--book':
-                if index + 1 >= len(args):
-                    print('Missing path after --book')
-                    sys.exit(1)
-                if book_path is not None:
-                    print('--book may only be specified once')
-                    sys.exit(1)
-                book_path = args[index + 1]
-                index += 2
-            elif argument.startswith('--book='):
-                if book_path is not None:
-                    print('--book may only be specified once')
-                    sys.exit(1)
-                book_path = argument.partition('=')[2]
-                if not book_path:
-                    print('Missing path after --book')
-                    sys.exit(1)
-                index += 1
-            else:
-                positional_args.append(argument)
-                index += 1
-
-        if len(positional_args) in (3, 4) and positional_args[0] == '--logdir':
-            stockfish_eval_main(
-                positional_args[2],
-                logdir=positional_args[1],
-                checkpoint_path=positional_args[3] if len(positional_args) == 4 else None,
-                book_path=book_path,
+    elif args.command == 'tournament':
+        tournament_main(args.config, logdirs=args.logdir, book_path=args.book)
+    elif args.command == 'stockfish-eval':
+        config_path = args.consortium or args.evaluation_config
+        if config_path is None:
+            raise SystemExit('stockfish-eval requires an evaluation config')
+        if args.consortium and args.evaluation_config:
+            raise SystemExit(
+                'Pass the consortium config positionally or with --consortium, not both'
             )
-        elif len(positional_args) == 3 and positional_args[0] == '--onnx':
-            stockfish_eval_main(
-                positional_args[2],
-                onnx_checkpoint_path=positional_args[1],
-                book_path=book_path,
+        if args.checkpoint and args.checkpoint_option:
+            raise SystemExit(
+                'Specify the checkpoint positionally or with --checkpoint, not both'
             )
-        elif len(positional_args) == 2 and positional_args[0] == '--consortium':
-            stockfish_eval_main(
-                positional_args[1],
-                book_path=book_path,
-            )
-        else:
-            print('Usage:')
-            print('  python -m bumblebot_trainer stockfish-eval --logdir <logdir> <evaluation_config.yaml> [pytorch_checkpoint] [--book <book.csv>]')
-            print('  python -m bumblebot_trainer stockfish-eval --onnx <standalone.onnx> <evaluation_config.yaml> [--book <book.csv>]')
-            print('  python -m bumblebot_trainer stockfish-eval --consortium <consortium_evaluation_config.yaml> [--book <book.csv>]')
-            sys.exit(1)
-    elif len(sys.argv) >= 2 and sys.argv[1] == 'export':
-        if len(sys.argv) not in (3, 4, 5):
-            print("Usage: python -m bumblebot_trainer export <logdir> [output_path] [checkpoint_path]")
-            sys.exit(1)
-        export_main(
-            sys.argv[2],
-            output_path=sys.argv[3] if len(sys.argv) >= 4 else None,
-            checkpoint_path=sys.argv[4] if len(sys.argv) >= 5 else None,
+        stockfish_eval_main(
+            config_path,
+            logdir=args.logdir,
+            onnx_checkpoint_path=args.onnx,
+            checkpoint_path=args.checkpoint_option or args.checkpoint,
+            book_path=args.book,
         )
     else:
-        if len(sys.argv) != 2:
-            print("Usage: python -m bumblebot_trainer <config_path>")
-            print("   or: python -m bumblebot_trainer evaluate --logdir <run_dir> [--checkpoint <checkpoint.pth>] [--step N] [--mlflow]")
-            print("   or: python -m bumblebot_trainer tournament <tournament_config.yaml> [--logdir <run_dir> ...] [--book <book.csv>]")
-            print("   or: python -m bumblebot_trainer export <logdir> [output_path] [checkpoint_path]")
-            print("   or: python -m bumblebot_trainer stockfish-eval --logdir <logdir> <evaluation_config.yaml> [pytorch_checkpoint] [--book <book.csv>]")
-            print("   or: python -m bumblebot_trainer stockfish-eval --onnx <standalone.onnx> <evaluation_config.yaml> [--book <book.csv>]")
-            print("   or: python -m bumblebot_trainer stockfish-eval --consortium <consortium_evaluation_config.yaml> [--book <book.csv>]")
-            sys.exit(1)
-        config_path = sys.argv[1]
-        main(config_path)
+        export_main(args.logdir, args.output_path, args.checkpoint)
+
+
+def cli(argv: list[str] | None = None) -> None:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] not in COMMANDS and argv[0] not in ('-h', '--help'):
+        training_parser = argparse.ArgumentParser(
+            prog='python -m bumblebot_trainer',
+            description='Train a model using the given YAML config.',
+        )
+        training_parser.add_argument('config', help='Training YAML config')
+        main(training_parser.parse_args(argv).config)
+        return
+
+    _run_command(build_parser().parse_args(argv))
+
+
+if __name__ == '__main__':
+    cli()

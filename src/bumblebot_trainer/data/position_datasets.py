@@ -1,5 +1,3 @@
-import json
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -8,7 +6,7 @@ from datasets import load_dataset, VerificationMode
 from datasets_sql import query as sql_query
 
 from .utils import process_item, get_game_phase, VariationNode
-from ..utils import eval_to_whitewinpercent
+from ..utils import eval_to_playerwinpercent
 
 
 class PositionDataset(Dataset):
@@ -41,6 +39,12 @@ class PositionDataset(Dataset):
 
 
 class LichessEvalDataset(PositionDataset):
+    """Dataset of ~400m positions analyzed with various versions of
+    stockfish at high depth. Contains multi-pv lines and centipawn/mate
+    value annotations for each pv.
+
+    This dataset is licensed under the cc0-1.0 license
+    """
     def __init__(self, encoding, split='train'):
         super().__init__(encoding)
         print('Preparing LichessEvalDataset')
@@ -67,7 +71,7 @@ class LichessEvalDataset(PositionDataset):
 
         if split == 'train':
             selected = range(1_000_000, 30_000_000)
-        elif split == 'eval':
+        elif split == 'valid':
             selected = range(500_000)
 
         dataset = load_dataset(
@@ -104,7 +108,7 @@ class LichessEvalDataset(PositionDataset):
                 continue
 
             node = VariationNode(move=line.split()[0], cp=cp, mate=mate)
-            winpercent = eval_to_whitewinpercent(cp, mate)
+            winpercent = eval_to_playerwinpercent(cp, mate)
             if board.turn == chess.BLACK and winpercent != -100:
                 winpercent = 100.0 - winpercent
             expected_result = winpercent / 100.0

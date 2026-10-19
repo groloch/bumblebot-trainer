@@ -8,8 +8,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import chess
 
-from ..data.utils import encode_board, get_game_phase
+from ..data.utils import get_game_phase
 from ..utils import get_move_id
+from .utils import encode_position
 
 
 _POSITION_CACHE: OrderedDict = OrderedDict()
@@ -40,15 +41,7 @@ def _encode_position(board: chess.Board, encoding: str) -> dict:
             _POSITION_CACHE.move_to_end(cache_key)
             return cached
 
-        encoded = encode_board(board, encoding)
-        if isinstance(encoded, tuple):
-            tokens, extra = encoded
-        else:
-            tokens, extra = encoded, {}
-        position = {
-            'tokens': tokens.numpy(),
-            'extra': {key: value.numpy() for key, value in extra.items()},
-        }
+        position = encode_position(board, encoding)
         position['position_key'] = _encoded_position_key(position['tokens'], position['extra'])
         _POSITION_CACHE[cache_key] = position
         if len(_POSITION_CACHE) > _POSITION_CACHE_LIMIT:

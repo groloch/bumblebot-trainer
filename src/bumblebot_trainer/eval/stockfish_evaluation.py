@@ -1,4 +1,3 @@
-import json
 import multiprocessing as mp
 import os
 import queue
@@ -9,77 +8,44 @@ from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
+import torch
 
-from ..config import StockfishEvaluationConfig
-from .book import load_openings
+from ..config import StockfishEvaluationConfig, SSLModelConfig
+from ..modeling import ChessModel, SSLChessModel, PositionClassificationHeads
 from .onnx_policy import OnnxPolicyModel
 from .stockfish_game_worker import play_game_pair
 from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo
 from .consortium import PolicyConsortium
-
-
-def _resolve_checkpoint(logdir: Path, training_name: str, explicit_path: str | None) -> Path:
-    if explicit_path is not None:
-        checkpoint = Path(explicit_path).expanduser()
-        if checkpoint.suffix.lower() == '.onnx':
-            raise ValueError(
-                'A standalone ONNX checkpoint cannot be combined with a model logdir; '
-                'use the --onnx mode instead.'
-            )
-        if not checkpoint.is_file():
-            raise FileNotFoundError(f'Checkpoint not found: {checkpoint}')
-        return checkpoint
-
-    final_checkpoint = logdir / f'{training_name}.pth'
-    if final_checkpoint.is_file():
-        return final_checkpoint
-
-    candidates = []
-    prefix = f'{training_name}_step'
-    for candidate in logdir.glob(f'{prefix}*.pth'):
-        step = candidate.stem[len(prefix):]
-        if step.isdigit():
-            candidates.append((int(step), candidate))
-    if candidates:
-        return max(candidates, key=lambda item: item[0])[1]
-
-    raise FileNotFoundError(
-        f'Could not find {training_name}.pth or a {training_name}_step*.pth checkpoint in {logdir}'
-    )
+from .utils import (
+    atomic_write_json,
+    autocast,
+    get_model_embeddings,
+    load_run_config,
+    resolve_checkpoint,
+    resolve_path,
+    stack_positions,
+    load_openings
+)
 
 
 def _load_model_from_logdir(
     logdir: Path,
     checkpoint_path: str | None,
 ):
-    config_paths = sorted(logdir.glob('*.yaml')) + sorted(logdir.glob('*.yml'))
-    if not config_paths:
-        raise FileNotFoundError(f'No config YAML file found in {logdir}')
-    if len(config_paths) != 1:
-        raise RuntimeError(
-            f'Expected one config YAML file in {logdir}, found: '
-            + ', '.join(path.name for path in config_paths)
-        )
-
-    config = load_config_file(str(config_paths[0]))
+    config = load_run_config(logdir)
     training_name = config.get('training', {}).get('name')
     if not training_name:
-        raise ValueError(f'Missing training.name in {config_paths[0]}')
-    checkpoint = _resolve_checkpoint(logdir, training_name, checkpoint_path)
+        raise ValueError(f'Missing training.name in run config under {logdir}')
+    checkpoint = resolve_checkpoint(logdir, training_name, checkpoint_path)
 
     encoding = config.get('data', {}).get('encoding')
     if not encoding:
-        raise ValueError(f'Missing data.encoding in {config_paths[0]}')
-
-    import torch
-
-    from ..config import SSLModelConfig
-    from ..modeling import ChessModel, SSLChessModel
+        raise ValueError(f'Missing data.encoding in run config under {logdir}')
 
     model_config = build_model_config(config['model'])
     run_type = config.get('type')
-    if run_type == 'ssl' or True:
+    if run_type == 'ssl':
         ssl_config = SSLModelConfig(**vars(model_config))
         model = SSLChessModel(ssl_config)
     elif run_type in ('pv', 'pv_finetune', 'pvtuner'):
@@ -96,32 +62,10 @@ def _load_model_from_logdir(
     return model, encoding, config, checkpoint, device
 
 
-def _resolve_path(path: str, base_dir: Path) -> Path:
-    resolved = Path(path).expanduser()
-    if not resolved.is_absolute():
-        resolved = base_dir / resolved
-    return resolved.resolve()
-
-
-def _load_run_config(logdir: Path) -> dict:
-    config_paths = sorted(logdir.glob('*.yaml')) + sorted(logdir.glob('*.yml'))
-    if len(config_paths) != 1:
-        raise RuntimeError(
-            f'Expected one config YAML file in {logdir}, found: '
-            + ', '.join(path.name for path in config_paths)
-        )
-    return load_config_file(str(config_paths[0]))
-
-
 def _load_consortium(
     consortium_config: dict,
     config_dir: Path,
 ):
-    import torch
-
-    from ..config import SSLModelConfig
-    from ..modeling import PositionClassificationHeads, SSLChessModel
-
     groups = consortium_config.get('expert_groups', [])
     supported_groups = {'phase', 'activity', 'evaluation'}
     if not groups or len(groups) != len(set(groups)) or not set(groups) <= supported_groups:
@@ -140,31 +84,31 @@ def _load_consortium(
         if router_config is None:
             raise ValueError('Router paths are required for activity or evaluation groups')
 
-        classifier_logdir = _resolve_path(router_config['classification_logdir'], config_dir)
-        classifier_config = _load_run_config(classifier_logdir)
+        classifier_logdir = resolve_path(router_config['classification_logdir'], config_dir)
+        classifier_config = load_run_config(classifier_logdir)
         if classifier_config.get('type') != 'classification':
             raise ValueError('The router run must use type: classification')
 
         router_training = classifier_config.get('training', {})
         classifier_checkpoint = router_config.get('classification_checkpoint')
         if classifier_checkpoint is not None:
-            classifier_checkpoint = str(_resolve_path(classifier_checkpoint, classifier_logdir))
-        classifier_checkpoint = _resolve_checkpoint(
+            classifier_checkpoint = str(resolve_path(classifier_checkpoint, classifier_logdir))
+        classifier_checkpoint = resolve_checkpoint(
             classifier_logdir,
             router_training['name'],
             classifier_checkpoint
         )
 
-        base_logdir = _resolve_path(router_config['base_model_logdir'], config_dir)
-        base_config = _load_run_config(base_logdir)
+        base_logdir = resolve_path(router_config['base_model_logdir'], config_dir)
+        base_config = load_run_config(base_logdir)
         if base_config.get('type') != 'ssl':
             raise ValueError('The router base model must use type: ssl')
 
         base_training = base_config.get('training', {})
         base_checkpoint = router_config.get('base_model_checkpoint')
         if base_checkpoint is not None:
-            base_checkpoint = str(_resolve_path(base_checkpoint, base_logdir))
-        base_checkpoint = _resolve_checkpoint(
+            base_checkpoint = str(resolve_path(base_checkpoint, base_logdir))
+        base_checkpoint = resolve_checkpoint(
             base_logdir,
             base_training['name'],
             base_checkpoint
@@ -207,13 +151,13 @@ def _load_consortium(
         for expert_name in expected_experts[group]:
             expert_spec = group_experts[expert_name]
             if isinstance(expert_spec, str):
-                expert_logdir = _resolve_path(expert_spec, config_dir)
+                expert_logdir = resolve_path(expert_spec, config_dir)
                 expert_checkpoint = None
             else:
-                expert_logdir = _resolve_path(expert_spec['logdir'], config_dir)
+                expert_logdir = resolve_path(expert_spec['logdir'], config_dir)
                 expert_checkpoint = expert_spec.get('checkpoint')
                 if expert_checkpoint is not None:
-                    expert_checkpoint = str(_resolve_path(expert_checkpoint, expert_logdir))
+                    expert_checkpoint = str(resolve_path(expert_checkpoint, expert_logdir))
 
             model, expert_encoding, _, checkpoint, expert_device = _load_model_from_logdir(
                 expert_logdir,
@@ -232,7 +176,12 @@ def _load_consortium(
             experts[group][expert_name] = model
             checkpoint_info['experts'][group][expert_name] = str(checkpoint)
 
-    return PolicyConsortium(router_base, router_heads, experts, groups), encoding, checkpoint_info, device
+    return (
+        PolicyConsortium(router_base, router_heads, experts, groups),
+        encoding,
+        checkpoint_info,
+        device,
+    )
 
 
 def _load_standalone_onnx(
@@ -295,27 +244,9 @@ def _evaluate_batch(model, device, batch: list[dict]) -> list[int]:
             chosen.append(int(legal_ids[np.argmax(logits[row, legal_ids])]))
         return chosen
 
-    import torch
-
-    tokens = torch.from_numpy(np.stack([item['tokens'] for item in batch])).to(device)
-    extra_keys = set(batch[0]['extra'])
-    extra = {
-        key: torch.from_numpy(np.stack([item['extra'][key] for item in batch])).to(device)
-        for key in extra_keys
-    }
-
-    with torch.inference_mode(), torch.autocast(
-        device_type=device.type,
-        dtype=torch.bfloat16,
-        enabled=device.type == 'cuda',
-    ):
-        embedded = model.embed(tokens, **extra)
-        if hasattr(embedded, 'squares_embeddings'):
-            squares_embeddings = embedded.squares_embeddings
-        elif isinstance(embedded, tuple):
-            squares_embeddings = embedded[0]
-        else:
-            raise TypeError(f'Unsupported model embed output: {type(embedded).__name__}')
+    tokens, extra = stack_positions(batch, device)
+    with torch.inference_mode(), autocast(device):
+        squares_embeddings, _ = get_model_embeddings(model, tokens, extra)
         logits = model.policy_head(squares_embeddings, None).logits
 
     chosen = []
@@ -441,13 +372,9 @@ def run_stockfish_evaluation(
 
     config_dir = evaluation_config_path.parent
     if book_path is not None:
-        resolved_book_path = Path(book_path).expanduser()
-        if not resolved_book_path.is_absolute():
-            resolved_book_path = resolved_book_path.resolve()
+        resolved_book_path = resolve_path(book_path, Path.cwd())
     elif evaluation_config.book_path is not None:
-        resolved_book_path = Path(evaluation_config.book_path).expanduser()
-        if not resolved_book_path.is_absolute():
-            resolved_book_path = (config_dir / resolved_book_path).resolve()
+        resolved_book_path = resolve_path(evaluation_config.book_path, config_dir)
     else:
         resolved_book_path = Path('book.csv').expanduser().resolve()
     openings = load_openings(resolved_book_path)
@@ -592,12 +519,11 @@ def run_stockfish_evaluation(
         'pairs': pair_results,
     }
 
-    results_path = evaluation_config.results_path
-    if results_path:
-        results_path = Path(results_path).expanduser()
-        if not results_path.is_absolute():
-            results_path = (config_dir / results_path).resolve()
-    else:
+    results_path = (
+        resolve_path(evaluation_config.results_path, config_dir)
+        if evaluation_config.results_path else None
+    )
+    if results_path is None:
         if logdir_path is not None:
             results_dir = logdir_path
         elif evaluation_config.consortium is not None:
@@ -605,12 +531,7 @@ def run_stockfish_evaluation(
         else:
             results_dir = checkpoint.parent
         results_path = results_dir / 'stockfish_eval_results.json'
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = results_path.with_suffix(results_path.suffix + '.tmp')
-    with temporary_path.open('w') as output_file:
-        json.dump(output, output_file, indent=2)
-        output_file.write('\n')
-    os.replace(temporary_path, results_path)
+    atomic_write_json(results_path, output)
 
     print(
         f'Stockfish evaluation: Elo {elo:.0f} ± {elo_std:.0f}; '

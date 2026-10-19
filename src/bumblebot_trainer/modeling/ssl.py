@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import BertModel, BertConfig
 
 from .embedding import Embedding
-from .encoders import Encoder, EncoderOutput, build_encoder
+from .encoders import build_encoder
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants

@@ -1,8 +1,14 @@
-import numpy as np
 import torch
+
+from .utils import autocast, get_model_embeddings, stack_positions
 
 
 class PolicyConsortium:
+    """Expert consortium: several experts groups merging policies and value predictions
+    based on weights from an expert routing model.
+
+    Used to test different experts in their corresponding positions on full-game evaluations.
+    """
     ROUTER_CLASSES = {
         'activity': ('strategical', 'tactical'),
         'evaluation': ('winning', 'drawing', 'losing'),
@@ -14,31 +20,9 @@ class PolicyConsortium:
         self.experts = experts
         self.expert_groups = tuple(expert_groups)
 
-    @staticmethod
-    def _get_square_embeddings(model, tokens, extra):
-        embeddings = model.embed(tokens, **extra)
-        if hasattr(embeddings, 'squares_embeddings'):
-            return embeddings.squares_embeddings
-        if isinstance(embeddings, tuple):
-            return embeddings[0]
-        raise TypeError(f'Unsupported model embed output: {type(embeddings).__name__}')
-
-    @staticmethod
-    def _stack_extra(batch, device):
-        extra_keys = set(batch[0]['extra'])
-        return {
-            key: torch.from_numpy(
-                np.stack([item['extra'][key] for item in batch])
-            ).to(device)
-            for key in extra_keys
-        }
-
     @torch.inference_mode()
     def predict_move_ids(self, batch, device):
-        tokens = torch.from_numpy(
-            np.stack([item['tokens'] for item in batch])
-        ).to(device)
-        extra = self._stack_extra(batch, device)
+        tokens, extra = stack_positions(batch, device)
         legal_ids = [
             torch.as_tensor(item['legal_ids'], dtype=torch.long, device=device)
             for item in batch
@@ -49,12 +33,8 @@ class PolicyConsortium:
         route_weights = {}
         router_logits = None
         if 'activity' in self.expert_groups or 'evaluation' in self.expert_groups:
-            with torch.autocast(
-                device_type=device.type,
-                dtype=torch.bfloat16,
-                enabled=device.type == 'cuda',
-            ):
-                router_embeddings = self._get_square_embeddings(self.router_base, tokens, extra)
+            with autocast(device):
+                router_embeddings, _ = get_model_embeddings(self.router_base, tokens, extra)
                 router_logits, _ = self.router_heads(router_embeddings)
 
         if 'activity' in self.expert_groups:
@@ -80,15 +60,9 @@ class PolicyConsortium:
 
                 index_tensor = torch.tensor(indices, dtype=torch.long, device=device)
                 expert_extra = {key: value[index_tensor] for key, value in extra.items()}
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=torch.bfloat16,
-                    enabled=device.type == 'cuda',
-                ):
-                    expert_embeddings = self._get_square_embeddings(
-                        expert,
-                        tokens[index_tensor],
-                        expert_extra
+                with autocast(device):
+                    expert_embeddings, _ = get_model_embeddings(
+                        expert, tokens[index_tensor], expert_extra
                     )
                     logits = expert.policy_head(expert_embeddings, None).logits
 

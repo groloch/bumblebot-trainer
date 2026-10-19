@@ -17,6 +17,7 @@ from .utils import (
     model_parameters,
     wsd_schedule,
     dropout_schedule,
+    Trainer
 )
 from ..modeling import SSLChessModel, Predictor
 from ..data import (
@@ -49,8 +50,21 @@ from ..config import (
 )
 
 
-class SSLTrainer:
+class SSLTrainer(Trainer):
     """Trainer for the SSL pipeline, inspired by V-JEPA 2-AC.
+    The model and its predictor are supervised on the following training objectives:
+    - policy
+    - value (wdl)
+    - self-supervised loss: whether the predictor can recreate the future latent, given
+    a partially masked move sequence encoding, and the current latent. Since the move sequence
+    is partially masked, the predictor needs the missing information over the move sequence to
+    be available (encoded) in the current position latent; in other words the model needs to have
+    an implicit representation of the possible evolutions of the board state: the model needs to
+    calculate.
+    - perceptive losses: whether the predicted future latent is usable as-is: it could be close in
+    distance but be adversarial wrt the teacher's heads. The output of the teacher heads (policy,
+    value) on the predicted latent are compared to the teacher outputs directly on the future
+    position.
     """
     def __init__(self, config, config_path):
         # type hints
@@ -207,12 +221,6 @@ class SSLTrainer:
             self._current_dropout = self._dropout_fn(self._n_dropout_updates)
 
     def _load_datasets(self):
-        # dataset = Lc0GamesIterableSSLDataset(
-        #     min_moves=self.data_config.min_moves,
-        #     max_prediction_depth=self.data_config.max_prediction_depth,
-        #     encoding=self.data_config.encoding,
-        #     seed=self.training_config.seed
-        # )
         dataset = T91GamesSSLDataset(
             min_moves=self.data_config.min_moves,
             max_prediction_depth=self.data_config.max_prediction_depth,

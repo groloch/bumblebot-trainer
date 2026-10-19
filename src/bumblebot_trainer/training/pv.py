@@ -24,10 +24,12 @@ from ..tracking.metrics import (
     accuracy_stats,
     topk_accuracy_stats,
 )
-from .utils import init_logdir, init_run, model_parameters, wsd_schedule
+from .utils import init_logdir, init_run, model_parameters, wsd_schedule, Trainer
 
 
-class PVTrainer:
+class PVTrainer(Trainer):
+    """Trainer for policy-value training. Currently only used for fine-tuning a ssl-pretrained model.
+    """
     def __init__(self, config, config_path):
         print('Loading run configuration')
         raw_config = copy.deepcopy(config)

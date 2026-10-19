@@ -2,7 +2,7 @@ import re
 import numpy as np
 import torch
 import chess, chess.pgn
-from datasets import load_dataset, VerificationMode, Value
+from datasets import load_dataset
 
 from .position_datasets import PositionDataset
 from .utils import (
@@ -12,7 +12,8 @@ from .utils import (
     parse_result,
     encode_board,
     get_move_id,
-    get_game_phase
+    get_game_phase,
+    WdlDataset
 )
 
 
@@ -104,97 +105,27 @@ class LichessStandardGamesDataset(GamePositionDataset):
         return process_item(board, [node], self.encoding, self.temperature)
 
 
-class Lc0GamesDataset(GamePositionDataset):
-    """Lc0Games is a dataset of 170m games played by Leela Chess Zero against itself.
-    The moves are written in uci format, and some games are chess960 games for which
-    the start fen is specified. To keep the dataset to a manageable size it is limited
-    to the first 4 shards here.
+class T91GamesDataset(GamePositionDataset, WdlDataset):
+    """This is a dataset containing a portion (~10m games; ~5% of the total to this date)
+    of the test91 large-scale reinforcement training run self-play games. This dataset contains
+    dense policy, wdl and scalar value targets.
 
-    This dataset is licensed under the odbl licence
+    This dataset is licensed under the odbl license.
     """
-    def __init__(self, min_moves, encoding: str):
-        super().__init__(min_moves, encoding)
-        data_files = [
-            'data/train-00000-of-00050.parquet',
-            'data/train-00001-of-00050.parquet',
-            # 'data/train-00002-of-00050.parquet',
-            # 'data/train-00003-of-00050.parquet',
-
-            # 'data/train-00004-of-00050.parquet',
-            # 'data/train-00005-of-00050.parquet',
-            # 'data/train-00006-of-00050.parquet',
-            # 'data/train-00007-of-00050.parquet',
-        ]
-
-        self.dataset = load_dataset(
-            'groloch/lc0_games',
-            split='train',
-            data_files=data_files,
-            verification_mode=VerificationMode.NO_CHECKS
-        )
-
-        self.dataset = self.dataset.filter(
-            lambda x: x['variant'] == 'normal'
-        ).map(
-            lambda x: {
-                'moves': x['moves'].split(),
-            },
-            num_proc=16
-        ).map(
-            lambda x: {
-                'moves': x['moves'],
-                'game_length': len(x['moves'])-min_moves,
-                'result': parse_result(x['result'])
-            },
-            num_proc=16
-        ).filter(
-            lambda x: x['game_length'] > 0, num_proc=16
-        ).cast_column(
-            'result', Value('int32')
-        )
-
-        self.games_lengths = np.cumsum(self.dataset['game_length'])
-        self.len = self.games_lengths[-1]
-
-    def __getitem__(self, idx):
-        game_idx = np.searchsorted(self.games_lengths, idx, side='right')
-        if game_idx == 0:
-            move_idx = idx
-        else:
-            move_idx = idx - self.games_lengths[game_idx - 1]
-
-        game = self.dataset[game_idx]
-        moves = game['moves']
-        board = chess.Board(chess960=True)
-
-        for k in range(self.min_moves+move_idx):
-            board.push(chess.Move.from_uci(moves[k]))
-
-        uci_move = moves[self.min_moves+move_idx] if self.min_moves+move_idx < len(moves) else None
-        cp = None
-        mate = None
-
-        node = VariationNode(uci_move, cp=cp, mate=mate)
-
-        return process_item(board, [node], self.encoding, self.temperature)
-
-
-class T91GamesDataset(GamePositionDataset):
-    TAGS = {
-        'all', 'winning', 'drawish', 'losing',
-        'opening', 'middlegame', 'endgame',
-        'tactical', 'strategical',
-    }
-
     def __init__(
             self,
             min_moves: int,
             encoding: str,
             tag: str = 'all'):
         super().__init__(min_moves, encoding)
+        self.TAGS = {
+            'all', 'winning', 'drawish', 'losing',
+            'opening', 'middlegame', 'endgame',
+            'tactical', 'strategical',
+        }
         self.tag = tag.lower()
         if self.tag not in self.TAGS:
-            raise ValueError(f'Unknown T91 position tag {tag!r}; expected one of {sorted(self.TAGS)}')
+            raise ValueError(f'Unknown position tag {tag}; expected one of {self.TAGS}')
 
         # self.dataset = load_dataset(
         #     'groloch/lc0_training_T91_10m',
@@ -215,44 +146,14 @@ class T91GamesDataset(GamePositionDataset):
         )
 
         self.len = len(self.dataset)
-        self.wdl_temp = 0.15
-
-    def _get_nodes(self, board: chess.Board, game, position_idx: int):
-        legal_moves = sorted(move.uci() for move in board.legal_moves)
-        policy = game['policies'][position_idx]
-
-        if len(legal_moves) != len(policy):
-            raise ValueError('Policy length does not match the number of legal moves')
-
-        return [
-            VariationNode(move=move, probability=percentage/100.0)
-            for move, percentage in zip(legal_moves, policy)
-        ]
-
-    @staticmethod
-    def _get_nearest_value(values, position_idx: int, field_name: str) -> float:
-        """Use the nearest available annotation if a position has a missing value."""
-        for distance in range(len(values)):
-            for candidate_idx in (position_idx - distance, position_idx + distance):
-                if 0 <= candidate_idx < len(values):
-                    value = values[candidate_idx]
-                    if value is not None and np.isfinite(value):
-                        return float(value)
-        raise ValueError(f'No non-null {field_name} annotation in this game')
-
-    def _get_wdl(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
-        value = self._get_nearest_value(game['qvalues'], position_idx, 'qvalue')
-        dvalue = self._get_nearest_value(game['dvalues'], position_idx, 'dvalue')
-
-        if turn == chess.BLACK:
-            value = 1-value
-
-        win = (value + 1) / 2
-        loss = 1 - win
-        wdl = torch.as_tensor([win, dvalue, loss], dtype=torch.float)
-        return (wdl / self.wdl_temp).softmax(dim=-1)
 
     def _match_tags(self, board, policy, value):
+        """Find positions in a game that match the given tag.
+        If no positions is found (should be a rare occurence since tags
+        are quite general), all positions are marked as valid. This behavior
+        can be viewed as using replays since tag filters are currently used
+        only in experts post-training.
+        """
         if self.tag == 'all':
             return True
         if self.tag in ('winning', 'drawish', 'losing'):
@@ -323,17 +224,23 @@ class T91GamesDataset(GamePositionDataset):
 
 
 class LichessPuzzlesDataset(PositionDataset):
-    TAGS = (
-        'defensiveMove', 'zugzwang', 'sacrifice', 'mate', 'quietMove', 'fork',
-        'skewer', 'pin', 'intermezzo', 'clearance', 'attraction', 'xRayAttack',
-        'advancedPawn', 'opening', 'middlegame', 'endgame',
-    )
+    """Dataset of lichess puzzles, used mainly for evaluation. Provides puzzles with
+    general (coarse) tags, elo ratings and multiple targets in case of positions with
+    multiple mates in 1.
 
+    This dataset is licensed under the cc0-1.0 license
+    """
     def __init__(self, encoding, split):
         super().__init__(encoding)
         if split not in ('train', 'valid'):
             raise ValueError(f'LichessPuzzlesDataset: split should be train or valid, received {split}')
         self.split = split
+
+        self.TAGS = {
+            'defensiveMove', 'zugzwang', 'sacrifice', 'mate', 'quietMove', 'fork',
+            'skewer', 'pin', 'intermezzo', 'clearance', 'attraction', 'xRayAttack',
+            'advancedPawn', 'opening', 'middlegame', 'endgame',
+        }
 
         self.dataset = load_dataset('Lichess/chess-puzzles', split='train')
         if split == 'valid':

@@ -1,10 +1,6 @@
-"""All-against-all, paired-game tournament evaluation for trained checkpoints."""
-
 import itertools
-import json
 from collections import OrderedDict
 import multiprocessing as mp
-import os
 import queue
 import random
 import time
@@ -12,17 +8,25 @@ from pathlib import Path
 
 import numpy as np
 from tqdm import tqdm
+import torch
 
-from ..config import TournamentConfig
+from ..modeling import PositionClassificationHeads, SSLChessModel
+from ..config import TournamentConfig, SSLModelConfig
 from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo_ratings
-from .book import load_openings
-from .stockfish_evaluation import (
-    _load_model_from_logdir,
-    _load_run_config,
-    _resolve_checkpoint,
-)
+from .stockfish_evaluation import _load_model_from_logdir
 from .tournament_game_worker import play_tournament_worker
+from .utils import (
+    atomic_write_json,
+    autocast,
+    get_model_embeddings,
+    load_run_config,
+    padded_legal_logits,
+    resolve_checkpoint,
+    resolve_path,
+    stack_positions,
+    load_openings
+)
 
 
 ROUTER_CLASSES = {
@@ -33,13 +37,6 @@ CONSORTIUM_GROUPS = {
     'phase': ('opening', 'middlegame', 'endgame'),
     **ROUTER_CLASSES,
 }
-
-
-def _resolve_path(path: str, base_dir: Path) -> Path:
-    resolved = Path(path).expanduser()
-    if not resolved.is_absolute():
-        resolved = base_dir / resolved
-    return resolved.resolve()
 
 
 def _prepare_models(configured_models, cli_logdirs, root_dir: Path):
@@ -58,7 +55,7 @@ def _prepare_models(configured_models, cli_logdirs, root_dir: Path):
         if not isinstance(spec, dict) or 'logdir' not in spec:
             raise ValueError(f'Each model must be a logdir string or mapping with logdir: {spec!r}')
 
-        logdir = _resolve_path(spec['logdir'], root_dir)
+        logdir = resolve_path(spec['logdir'], root_dir)
         if not logdir.is_dir():
             raise NotADirectoryError(f'Model logdir not found: {logdir}')
         explicit_name = spec.get('name')
@@ -76,8 +73,8 @@ def _prepare_models(configured_models, cli_logdirs, root_dir: Path):
         explicit_checkpoint = spec.get('checkpoint')
         checkpoint = None
         if explicit_checkpoint is not None:
-            checkpoint_path = _resolve_path(explicit_checkpoint, root_dir)
-            checkpoint = _resolve_checkpoint(logdir, '', str(checkpoint_path))
+            checkpoint_path = resolve_path(explicit_checkpoint, root_dir)
+            checkpoint = resolve_checkpoint(logdir, '', str(checkpoint_path))
         model, encoding, run_config, checkpoint, model_device = _load_model_from_logdir(
             logdir,
             str(checkpoint) if checkpoint is not None else None,
@@ -123,20 +120,15 @@ def _load_router_for_tournament(
             'or base_model_logdir'
         )
 
-    import torch
-
-    from ..config import SSLModelConfig
-    from ..modeling import PositionClassificationHeads, SSLChessModel
-
-    classification_logdir = _resolve_path(router_spec['classification_logdir'], root_dir)
-    classification_config = _load_run_config(classification_logdir)
+    classification_logdir = resolve_path(router_spec['classification_logdir'], root_dir)
+    classification_config = load_run_config(classification_logdir)
     if classification_config.get('type') != 'classification':
         raise ValueError('consortium.router.classification_logdir must be a classification run')
     classification_training = classification_config.get('training', {})
     classification_checkpoint = router_spec.get('classification_checkpoint')
     if classification_checkpoint is not None:
-        classification_checkpoint = str(_resolve_path(classification_checkpoint, root_dir))
-    classification_checkpoint = _resolve_checkpoint(
+        classification_checkpoint = str(resolve_path(classification_checkpoint, root_dir))
+    classification_checkpoint = resolve_checkpoint(
         classification_logdir,
         classification_training['name'],
         classification_checkpoint,
@@ -159,15 +151,15 @@ def _load_router_for_tournament(
         if base_hidden_size is not None and base_hidden_size != model_config.hidden_size:
             raise ValueError('Selected router base and classification heads have different hidden sizes')
     else:
-        base_logdir = _resolve_path(separate_base, root_dir)
-        base_config = _load_run_config(base_logdir)
+        base_logdir = resolve_path(separate_base, root_dir)
+        base_config = load_run_config(base_logdir)
         if base_config.get('type') != 'ssl':
             raise ValueError('consortium.router.base_model_logdir must be an SSL run')
         base_training = base_config.get('training', {})
         base_checkpoint = router_spec.get('base_model_checkpoint')
         if base_checkpoint is not None:
-            base_checkpoint = str(_resolve_path(base_checkpoint, root_dir))
-        base_checkpoint = _resolve_checkpoint(base_logdir, base_training['name'], base_checkpoint)
+            base_checkpoint = str(resolve_path(base_checkpoint, root_dir))
+        base_checkpoint = resolve_checkpoint(base_logdir, base_training['name'], base_checkpoint)
         base_encoding = base_config['data']['encoding']
         base_info = {
             'base_model_logdir': str(base_logdir),
@@ -364,6 +356,22 @@ def _validate_config(config: TournamentConfig):
         raise ValueError('max_game_plies must be positive')
     if config.prior_elo_std <= 0 or config.elo_min >= config.elo_max:
         raise ValueError('Invalid Bayesian Elo prior or rating bounds')
+    if config.pin_player is not None:
+        if not isinstance(config.pin_player, dict) or set(config.pin_player) != {'name', 'elo'}:
+            raise ValueError('pin_player must be a mapping with exactly `name` and `elo`')
+        if not isinstance(config.pin_player['name'], str) or not config.pin_player['name']:
+            raise ValueError('pin_player.name must be a non-empty participant name')
+        pinned_elo = config.pin_player['elo']
+        if (
+            isinstance(pinned_elo, bool)
+            or not isinstance(pinned_elo, (int, float))
+            or not np.isfinite(pinned_elo)
+            or not config.elo_min <= pinned_elo <= config.elo_max
+        ):
+            raise ValueError(
+                f'pin_player.elo must be finite and within '
+                f'[{config.elo_min}, {config.elo_max}]'
+            )
 
 
 def _standings_order(names, match_points, game_score):
@@ -375,18 +383,6 @@ def _standings_order(names, match_points, game_score):
             name.casefold(),
         ),
     )
-
-
-def _stack_positions(positions, device):
-    import torch
-
-    tokens = torch.from_numpy(np.stack([position['tokens'] for position in positions])).to(device)
-    extra_keys = set(positions[0]['extra'])
-    extra = {
-        key: torch.from_numpy(np.stack([position['extra'][key] for position in positions])).to(device)
-        for key in extra_keys
-    }
-    return tokens, extra
 
 
 def _unique_positions(positions, stats=None):
@@ -411,24 +407,9 @@ def _unique_positions(positions, stats=None):
 
 
 def _model_outputs(model, positions, device, *, policy: bool = False, value: bool = False):
-    import torch
-
-    tokens, extra = _stack_positions(positions, device)
-    with torch.inference_mode(), torch.autocast(
-        device_type=device.type,
-        dtype=torch.bfloat16,
-        enabled=device.type == 'cuda',
-    ):
-        embedded = model.embed(tokens, **extra)
-        if hasattr(embedded, 'squares_embeddings'):
-            squares = embedded.squares_embeddings
-            cls = embedded.cls_embedding
-        elif isinstance(embedded, tuple):
-            squares = embedded[0]
-            cls = squares.mean(dim=1)
-        else:
-            raise TypeError(f'Unsupported model embed output: {type(embedded).__name__}')
-
+    tokens, extra = stack_positions(positions, device)
+    with torch.inference_mode(), autocast(device):
+        squares, cls = get_model_embeddings(model, tokens, extra)
         policy_logits = model.policy_head(squares, None).logits if policy else None
         values = None
         if value:
@@ -449,7 +430,6 @@ def _cached_model_outputs(
     stats,
 ):
     """Run only cache misses and retain a bounded set of deterministic model outputs."""
-    import torch
 
     if output_kind not in ('policy', 'value'):
         raise ValueError(f'Unsupported cached model output: {output_kind}')
@@ -500,31 +480,15 @@ def _cached_model_outputs(
 
 def _base_model_worker(base_model, positions, device):
     """Encode positions once with the router base model; return its square embeddings."""
-    import torch
-
-    tokens, extra = _stack_positions(positions, device)
-    with torch.inference_mode(), torch.autocast(
-        device_type=device.type,
-        dtype=torch.bfloat16,
-        enabled=device.type == 'cuda',
-    ):
-        embedded = base_model.embed(tokens, **extra)
-        if hasattr(embedded, 'squares_embeddings'):
-            return embedded.squares_embeddings
-        if isinstance(embedded, tuple):
-            return embedded[0]
-    raise TypeError(f'Unsupported router base output: {type(embedded).__name__}')
+    tokens, extra = stack_positions(positions, device)
+    with torch.inference_mode(), autocast(device):
+        squares, _ = get_model_embeddings(base_model, tokens, extra)
+    return squares
 
 
 def _router_worker(router_heads, square_embeddings, device):
     """Run only the activity/evaluation classification heads on base embeddings."""
-    import torch
-
-    with torch.inference_mode(), torch.autocast(
-        device_type=device.type,
-        dtype=torch.bfloat16,
-        enabled=device.type == 'cuda',
-    ):
+    with torch.inference_mode(), autocast(device):
         logits, _ = router_heads(square_embeddings)
     return {
         group: torch.softmax(group_logits.float(), dim=-1).cpu().numpy()
@@ -532,44 +496,19 @@ def _router_worker(router_heads, square_embeddings, device):
     }
 
 
-def _padded_legal_logits(logits, legal_ids):
-    import torch
-
-    lengths = [len(ids) for ids in legal_ids]
-    if any(length == 0 for length in lengths):
-        raise ValueError('A non-terminal position has no legal moves')
-    max_moves = max(lengths)
-    padded = np.zeros((len(legal_ids), max_moves), dtype=np.int64)
-    mask = np.zeros((len(legal_ids), max_moves), dtype=np.bool_)
-    for row, ids in enumerate(legal_ids):
-        ids = np.asarray(ids, dtype=np.int64)
-        if ids.max() >= logits.shape[-1]:
-            raise ValueError('Policy output does not cover the legal move ids')
-        padded[row, :len(ids)] = ids
-        mask[row, :len(ids)] = True
-    padded_tensor = torch.from_numpy(padded).to(logits.device)
-    mask_tensor = torch.from_numpy(mask).to(logits.device)
-    legal_logits = logits.float().gather(1, padded_tensor)
-    legal_logits = legal_logits.masked_fill(~mask_tensor, float('-inf'))
-    return padded, lengths, legal_logits
-
-
 def _batch_legal_probabilities(logits, legal_ids):
-    import torch
-
-    padded, lengths, legal_logits = _padded_legal_logits(logits, legal_ids)
+    padded, lengths, legal_logits = padded_legal_logits(logits, legal_ids)
     probabilities = torch.softmax(legal_logits, dim=-1).cpu().numpy()
     return padded, lengths, probabilities
 
 
 def _batch_choose_moves(logits, requests, rng):
-    padded, lengths, legal_logits = _padded_legal_logits(
+    padded, lengths, legal_logits = padded_legal_logits(
         logits, [request['legal_ids'] for request in requests]
     )
     if requests[0]['play_mode'] == 'policy':
         choices = legal_logits.argmax(dim=1).cpu().numpy()
     else:
-        import torch
         probabilities = torch.softmax(legal_logits, dim=-1).cpu().numpy()
         choices = np.asarray([
             rng.choice(length, p=probabilities[row, :length])
@@ -1023,6 +962,11 @@ def _write_markdown(path: Path, output: dict):
         f"- Rounds: {output['summary']['rounds']}",
         f"- Play mode: {output['summary']['play_mode']}",
         f"- Participants: {len(output['participants'])}",
+        *(
+            [f"- Pinned player: {output['summary']['pin_player']['name']} "
+             f"at {output['summary']['pin_player']['elo']:g} Elo"]
+            if output['summary'].get('pin_player') else []
+        ),
         '- Each round uses one book position; each matchup is a two-game color-swapped pair.',
         '',
         '## Bayesian Elo rankings',
@@ -1089,7 +1033,7 @@ def run_tournament(
     config = TournamentConfig(**raw_config)
     _validate_config(config)
     root_dir = Path.cwd()
-    cli_logdirs = [str(Path(path).expanduser().resolve()) for path in (logdirs or [])]
+    cli_logdirs = [str(resolve_path(path, root_dir)) for path in (logdirs or [])]
     models, encodings, participants, device = _prepare_models(
         config.models, cli_logdirs, root_dir
     )
@@ -1113,11 +1057,16 @@ def run_tournament(
     participants.update(consortium_metadata)
     consortium_names = tuple(consortia)
     entrant_names = [*models, *consortium_names]
+    if config.pin_player is not None and config.pin_player['name'] not in entrant_names:
+        raise ValueError(
+            f'pin_player.name {config.pin_player["name"]!r} is not a tournament participant; '
+            f'available participants: {entrant_names}'
+        )
 
     if book_path is not None:
-        resolved_book = _resolve_path(book_path, root_dir)
+        resolved_book = resolve_path(book_path, root_dir)
     elif config.book_path is not None:
-        resolved_book = _resolve_path(config.book_path, root_dir)
+        resolved_book = resolve_path(config.book_path, root_dir)
     else:
         resolved_book = root_dir / 'book.csv'
     openings = load_openings(resolved_book)
@@ -1277,6 +1226,10 @@ def run_tournament(
         prior_std=config.prior_elo_std,
         elo_min=config.elo_min,
         elo_max=config.elo_max,
+        pinned_ratings=(
+            {config.pin_player['name']: config.pin_player['elo']}
+            if config.pin_player is not None else None
+        ),
     )
     game_stats = {
         name: {'wins': 0, 'draws': 0, 'losses': 0, 'games': 0}
@@ -1325,6 +1278,7 @@ def run_tournament(
             'num_matchups_per_round': len(pairings),
             'num_matches': sum(len(record['matches']) for record in rounds),
             'num_games': len(all_games),
+            'pin_player': config.pin_player,
             'seed': config.seed,
             'book': str(resolved_book),
             'device': str(device),
@@ -1335,7 +1289,7 @@ def run_tournament(
     }
 
     if config.results_path:
-        result_path = _resolve_path(config.results_path, root_dir)
+        result_path = resolve_path(config.results_path, root_dir)
         if result_path.suffix.lower() not in ('.json', '.md'):
             result_path = result_path.with_suffix('.json')
         json_path = result_path.with_suffix('.json')
@@ -1343,12 +1297,7 @@ def run_tournament(
     else:
         json_path = root_dir / 'tournament_results.json'
         markdown_path = root_dir / 'tournament_results.md'
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = json_path.with_suffix(json_path.suffix + '.tmp')
-    with temporary_path.open('w', encoding='utf-8') as output_file:
-        json.dump(output, output_file, indent=2)
-        output_file.write('\n')
-    os.replace(temporary_path, json_path)
+    atomic_write_json(json_path, output)
     _write_markdown(markdown_path, output)
 
     print(f'Tournament Elo rankings ({config.play_mode}, paired all-against-all):')

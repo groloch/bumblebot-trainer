@@ -11,7 +11,6 @@ def binary_f1_stats(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor
     fn = (~predictions & targets).sum(dtype=torch.float32)
     return torch.stack([tp, fp, fn])
 
-
 @torch.no_grad()
 def binary_f1_from_stats(stats: torch.Tensor) -> torch.Tensor:
     tp, fp, fn = stats.unbind()
@@ -22,12 +21,10 @@ def binary_f1_from_stats(stats: torch.Tensor) -> torch.Tensor:
         torch.ones((), device=stats.device, dtype=torch.float32)
     )
 
-
 def binary_f1(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Standard f1 score
     """
     return binary_f1_from_stats(binary_f1_stats(logits, targets)).item()
-
 
 @torch.no_grad()
 def multiclass_confusion_matrix(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -40,7 +37,6 @@ def multiclass_confusion_matrix(logits: torch.Tensor, targets: torch.Tensor) -> 
         flat_indices,
         minlength=num_classes * num_classes
     ).reshape(num_classes, num_classes).to(dtype=torch.float32)
-
 
 @torch.no_grad()
 def multiclass_f1_from_confusion_matrix(confusion_matrix: torch.Tensor) -> torch.Tensor:
@@ -55,7 +51,6 @@ def multiclass_f1_from_confusion_matrix(confusion_matrix: torch.Tensor) -> torch
         torch.zeros_like(denom)
     )
     return f1_scores.mean()
-
 
 def multiclass_f1(logits: torch.Tensor, targets: torch.Tensor) -> float:
     """Macro-averaged f1 score
@@ -72,7 +67,6 @@ def accuracy(logits: torch.Tensor, targets: torch.Tensor) -> float:
         accuracy = correct / total
     return accuracy.item()
 
-
 def _target_classes(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     if targets.shape == logits.shape:
         return targets.argmax(dim=-1)
@@ -81,7 +75,6 @@ def _target_classes(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor
         targets = targets.squeeze(-1)
 
     return targets.long()
-
 
 @torch.no_grad()
 def accuracy_stats(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -93,7 +86,6 @@ def accuracy_stats(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     correct = (predictions == targets).sum()
     total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
     return torch.stack([correct, total])
-
 
 @torch.no_grad()
 def topk_accuracy_stats(
@@ -108,13 +100,11 @@ def topk_accuracy_stats(
     total = torch.tensor(targets.numel(), device=logits.device, dtype=torch.long)
     return torch.stack([correct, total])
 
-
 @torch.no_grad()
 def accuracy_from_stats(stats: torch.Tensor) -> torch.Tensor:
     correct, total = stats.unbind()
     total = total.clamp(min=1)
     return correct.float() / total.float()
-
 
 @torch.no_grad()
 def mae_stats(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
@@ -124,7 +114,6 @@ def mae_stats(predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     error = (predictions - targets).abs().sum()
     count = torch.tensor(targets.numel(), device=targets.device, dtype=torch.long)
     return torch.stack([error, count])
-
 
 @torch.no_grad()
 def mae_from_stats(stats: torch.Tensor) -> torch.Tensor:

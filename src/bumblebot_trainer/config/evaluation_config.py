@@ -9,5 +9,5 @@ class EvaluationConfig:
     elo_min: float
     elo_max: float
     elo_step: float
-    prior_elo_mean: float = 1500.0
-    prior_elo_std: float = 1000.0
+    prior_elo_mean: float
+    prior_elo_std: float
