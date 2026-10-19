@@ -11,6 +11,7 @@ from tqdm import tqdm
 from ..config import CFEncoderConfig, SSLModelConfig, TrackingConfig
 from ..data import T91GamesDataset
 from ..modeling import PositionClassificationHeads, SSLChessModel
+from ..modeling.utils import load_model_state_dict
 from ..tracking import MetricLogger
 from ..tracking.metrics import (
     accuracy_from_stats,
@@ -70,7 +71,7 @@ class ClassificationTrainer(Trainer):
         state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
         if isinstance(state, dict) and 'state_dict' in state:
             state = state['state_dict']
-        self.base_model.load_state_dict(state, strict=True)
+        load_model_state_dict(self.base_model, state)
         self.base_model.requires_grad_(False)
         if hasattr(self.base_model.encoder, 'layer_dropout'):
             self.base_model.encoder.layer_dropout = False

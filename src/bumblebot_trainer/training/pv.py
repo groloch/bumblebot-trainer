@@ -3,7 +3,6 @@ import os
 
 import mlflow
 import torch
-import torch.nn.functional as F
 from torch.optim import AdamW, Muon
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -15,9 +14,15 @@ from ..config import (
     SSLModelConfig,
     TrackingConfig,
 )
-from ..data import CombinedPositionDataset, LichessPuzzlesDataset, T91GamesDataset
+from ..data import (
+    CombinedPositionDataset,
+    LichessPuzzlesDataset,
+    PositionCollator,
+    T91GamesDataset,
+)
 from ..eval import PuzzleEvaluator
 from ..modeling import SSLChessModel
+from ..modeling.utils import load_model_state_dict
 from ..tracking import AccumulationBuffer, MetricLogger
 from ..tracking.metrics import (
     accuracy_from_stats,
@@ -89,7 +94,7 @@ class PVTrainer(Trainer):
         state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
         if isinstance(state, dict) and 'state_dict' in state:
             state = state['state_dict']
-        self.model.load_state_dict(state, strict=True)
+        load_model_state_dict(self.model, state)
         print(f'Loaded pretrained weights from {checkpoint_path}')
 
     def _load_datasets(self):
@@ -114,6 +119,7 @@ class PVTrainer(Trainer):
             shuffle=True,
             num_workers=self.training_config['num_workers'],
             pin_memory=True,
+            collate_fn=PositionCollator(),
         )
 
     def _build_optimizer(self):
@@ -214,20 +220,12 @@ class PVTrainer(Trainer):
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 _, logits, losses = self.model(tokens, target=targets, **extra)
                 policy_loss = losses['policy']
-                value_mask = targets.get('value_mask')
-                if value_mask is None:
-                    value_loss = losses['value']
-                else:
-                    value_loss_per_sample = F.smooth_l1_loss(
-                        logits['value'].float(),
-                        targets['value'].float(),
-                        reduction='none',
-                    ).mean(dim=-1)
-                    value_mask = value_mask.float()
-                    value_loss = (value_loss_per_sample * value_mask).sum() / value_mask.sum().clamp_min(1.0)
+                value_loss = losses['value']
+                qvalue_loss = losses['qvalue']
                 total_loss = (
                     policy_loss * self.training_config['policy_loss_weight']
                     + value_loss * self.training_config['value_loss_weight']
+                    + qvalue_loss * self.training_config['qvalue_loss_weight']
                 ) / gradient_accumulation_steps
 
             total_loss.backward()
@@ -242,6 +240,12 @@ class PVTrainer(Trainer):
             acc_buffer.update(
                 'value_loss',
                 value_loss.detach() * self.training_config['value_loss_weight'],
+                partial_step,
+            )
+            acc_buffer.update('qvalue_loss_unscaled', qvalue_loss.detach(), partial_step)
+            acc_buffer.update(
+                'qvalue_loss',
+                qvalue_loss.detach() * self.training_config['qvalue_loss_weight'],
                 partial_step,
             )
             policy_stats += accuracy_stats(logits['policy'].detach(), targets['policy'])
@@ -263,6 +267,8 @@ class PVTrainer(Trainer):
             self.logger.update('policy_top3_accuracy', accuracy_from_stats(policy_top3_stats).item())
             self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
             self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
+            self.logger.update('qvalue_loss_unscaled', acc_buffer.get_mean('qvalue_loss_unscaled'))
+            self.logger.update('qvalue_loss', acc_buffer.get_mean('qvalue_loss'))
 
             acc_buffer.reset()
             policy_stats.zero_()

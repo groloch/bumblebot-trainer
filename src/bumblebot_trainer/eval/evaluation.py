@@ -265,9 +265,11 @@ class StockfishEvaluator:
             'kl_sum': 0.0,
             'target_confidence_sum': 0.0,
         })
-        value_abs_error_sum = 0.0
-        cp_loss_sum = 0.0
-        value_count = 0
+        wdl_abs_error_sum = 0.0
+        wdl_cp_loss_sum = 0.0
+        qvalue_abs_error_sum = 0.0
+        qvalue_cp_loss_sum = 0.0
+        qvalue_count = 0
         value_from_logits = isinstance(
             getattr(self.model.value_head, 'loss_fn', None),
             nn.CrossEntropyLoss,
@@ -294,6 +296,7 @@ class StockfishEvaluator:
                 squares, value_embedding = get_model_embeddings(self.model, tokens, extra)
                 policy_logits = self.model.policy_head(squares, None).logits
                 value_output = self.model.value_head(value_embedding, None).logits
+                qvalue_output = self.model.qvalue_head(value_embedding, None).logits
 
             policy_targets = targets['policy'].float()
             policy_targets = policy_targets.clamp_min(0.0)
@@ -334,23 +337,25 @@ class StockfishEvaluator:
                     target_confidence,
                 )
 
-            predicted_expected_result = wdl_to_expected_result(
+            predicted_wdl_result = wdl_to_expected_result(
                 value_output,
                 from_logits=value_from_logits,
             )
-            target_expected_result = targets['value'].float()
-            if target_expected_result.ndim > 1 and target_expected_result.shape[-1] == 3:
-                target_expected_result = wdl_to_expected_result(target_expected_result)
-            else:
-                target_expected_result = target_expected_result.reshape(-1).clamp(0.0, 1.0)
-
-            predicted_cp = expected_result_to_cp(predicted_expected_result)
+            predicted_qvalue = qvalue_output.float().reshape(-1).clamp(0.0, 1.0)
+            target_qvalue = targets['qvalue'].float().reshape(-1).clamp(0.0, 1.0)
             stockfish_cp = targets['stockfish_cp'].float().reshape(-1)
-            value_abs_error_sum += float(
-                (predicted_expected_result - target_expected_result).abs().sum().item()
+
+            wdl_cp = expected_result_to_cp(predicted_wdl_result)
+            qvalue_cp = expected_result_to_cp(predicted_qvalue)
+            wdl_abs_error_sum += float(
+                (predicted_wdl_result - target_qvalue).abs().sum().item()
             )
-            cp_loss_sum += float((predicted_cp - stockfish_cp).abs().sum().item())
-            value_count += int(target_expected_result.numel())
+            wdl_cp_loss_sum += float((wdl_cp - stockfish_cp).abs().sum().item())
+            qvalue_abs_error_sum += float(
+                (predicted_qvalue - target_qvalue).abs().sum().item()
+            )
+            qvalue_cp_loss_sum += float((qvalue_cp - stockfish_cp).abs().sum().item())
+            qvalue_count += int(target_qvalue.numel())
 
         metrics: dict[str, float] = {}
         for name, group in stats.items():
@@ -366,10 +371,18 @@ class StockfishEvaluator:
                 group['target_confidence_sum'], count
             )
 
-        metrics['stockfish/value/expected_result_mae'] = _mean_or_zero(
-            value_abs_error_sum, value_count
+        metrics['stockfish/wdl/expected_result_mae'] = _mean_or_zero(
+            wdl_abs_error_sum, qvalue_count
         )
-        metrics['stockfish/value/centipawn_loss'] = _mean_or_zero(cp_loss_sum, value_count)
+        metrics['stockfish/wdl/centipawn_loss'] = _mean_or_zero(
+            wdl_cp_loss_sum, qvalue_count
+        )
+        metrics['stockfish/qvalue/expected_result_mae'] = _mean_or_zero(
+            qvalue_abs_error_sum, qvalue_count
+        )
+        metrics['stockfish/qvalue/centipawn_loss'] = _mean_or_zero(
+            qvalue_cp_loss_sum, qvalue_count
+        )
 
         if self.use_mlflow:
             mlflow.log_metrics(metrics, step=step)

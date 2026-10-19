@@ -95,8 +95,7 @@ class LichessEvalDataset(PositionDataset):
     def __len__(self):
         return len(self.dataset)
 
-    def __getitem__(self, index):
-        sample = self.dataset[index]
+    def _get_position_data(self, sample, index):
         board = chess.Board(sample['fen'])
         max_depth = max(sample['depths'])
 
@@ -118,17 +117,25 @@ class LichessEvalDataset(PositionDataset):
             raise ValueError(f'LichessEvalDataset position {index} has no scored PV at max depth')
 
         nodes = [node for node, _ in scored_nodes]
-        best_node, best_expected_result = max(scored_nodes, key=lambda item: item[1])
+        best_node, qvalue = max(scored_nodes, key=lambda item: item[1])
         if best_node.mate is not None:
-            stockfish_cp = 1000.0 if best_expected_result >= 0.5 else -1000.0
+            stockfish_cp = 1000.0 if qvalue >= 0.5 else -1000.0
         else:
             stockfish_cp = float(best_node.cp)
             if board.turn == chess.BLACK:
                 stockfish_cp = -stockfish_cp
         stockfish_cp = max(min(stockfish_cp, 1000.0), -1000.0)
 
+        return board, nodes, qvalue, stockfish_cp
+
+    def _format_sample(self, board, nodes, qvalue, stockfish_cp):
         tokens, targets, extra = process_item(
-            board, nodes, self.encoding, self.temperature
+            board,
+            nodes,
+            self.encoding,
+            self.temperature,
+            qvalue=qvalue,
+            value_valid=False,
         )
         targets['stockfish_cp'] = torch.tensor(stockfish_cp, dtype=torch.float32)
         targets['game_phase'] = torch.tensor(
@@ -136,6 +143,11 @@ class LichessEvalDataset(PositionDataset):
             dtype=torch.long,
         )
         return tokens, targets, extra
+
+    def __getitem__(self, index):
+        sample = self.dataset[index]
+        board, nodes, qvalue, stockfish_cp = self._get_position_data(sample, index)
+        return self._format_sample(board, nodes, qvalue, stockfish_cp)
 
 
 class CombinedPositionDataset(Dataset):

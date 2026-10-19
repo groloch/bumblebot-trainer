@@ -13,7 +13,12 @@ from .game_datasets import (
 from .ssl import (
     LichessStandardIterableSSLDataset,
     LichessStandardGamesSSLDataset,
+    LichessPuzzlesSSLDataset,
+    LichessEvalSSLDataset,
     T91GamesIterableSSLDataset,
     T91GamesSSLDataset,
-    SSLCollator
+    MixedSSLDataset,
+    MixedSSLIterableDataset,
+    SSLCollator,
+    PositionCollator,
 )

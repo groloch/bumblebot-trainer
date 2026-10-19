@@ -56,10 +56,15 @@ class WdlDataset:
                         return float(value)
         return 0.5
 
+    def _get_qvalue(self, turn: chess.Color, game, position_idx: int) -> float:
+        """Return the expected result from the side-to-move perspective."""
+        value = min(max(self._get_nearest_value(game['qvalues'], position_idx), 0.0), 1.0)
+        if turn == chess.BLACK:
+            value = 1.0 - value
+        return value
+
     def _get_wdl(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
-        """Converts expected result (from the player to play's perspective) and expected
-        draw chances to wdl targets.
-        """
+        """Convert expected result and draw chances to side-to-move WDL targets."""
         value = self._get_nearest_value(game['qvalues'], position_idx)
         dvalue = self._get_nearest_value(game['dvalues'], position_idx)
 
@@ -208,6 +213,10 @@ def process_item(
         encoding: str,
         temperature: float = 0.1,
         value: Optional[float | torch.Tensor] = None,
+        qvalue: Optional[float | torch.Tensor] = None,
+        policy_valid: bool | None = None,
+        value_valid: bool | None = None,
+        qvalue_valid: bool | None = None,
         **kwargs):
     """Utility function for datasets that converts chess position
     into batchable model inputs.
@@ -236,7 +245,9 @@ def process_item(
     policy_target = torch.full((ChessConstants.NUM_POLICY_CLASSES,), float('-inf'), dtype=torch.float)
     policy_target[indices] = evals
 
-    if does_reweight:
+    if len(nodes) == 0:
+        policy_target.zero_()
+    elif does_reweight:
         policy_target = policy_target / temperature
         policy_target = torch.softmax(policy_target, dim=-1)
     else:
@@ -248,11 +259,30 @@ def process_item(
         else:
             value_target = torch.tensor(value)
     else:
-        value_target = torch.max(evals)
+        value_target = torch.zeros(3, dtype=torch.float)
+
+    if qvalue is not None:
+        if isinstance(qvalue, torch.Tensor):
+            qvalue_target = qvalue.float().reshape(())
+        else:
+            qvalue_target = torch.tensor(qvalue, dtype=torch.float)
+    else:
+        qvalue_target = torch.zeros((), dtype=torch.float)
+
+    if policy_valid is None:
+        policy_valid = len(nodes) > 0
+    if value_valid is None:
+        value_valid = value is not None
+    if qvalue_valid is None:
+        qvalue_valid = qvalue is not None
 
     target_dict = {
         'policy': policy_target,
         'value': value_target,
+        'qvalue': qvalue_target,
+        'policy_mask': torch.tensor(policy_valid, dtype=torch.bool),
+        'value_mask': torch.tensor(value_valid, dtype=torch.bool),
+        'qvalue_mask': torch.tensor(qvalue_valid, dtype=torch.bool),
     }
 
     extra = {**extra, **kwargs}

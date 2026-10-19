@@ -108,7 +108,7 @@ class LichessStandardGamesDataset(GamePositionDataset):
 class T91GamesDataset(GamePositionDataset, WdlDataset):
     """This is a dataset containing a portion (~10m games; ~5% of the total to this date)
     of the test91 large-scale reinforcement training run self-play games. This dataset contains
-    dense policy, wdl and scalar value targets.
+    dense policy, WDL, and scalar qvalue targets.
 
     This dataset is licensed under the odbl license.
     """
@@ -118,6 +118,7 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             encoding: str,
             tag: str = 'all'):
         super().__init__(min_moves, encoding)
+        WdlDataset.__init__(self)
         self.TAGS = {
             'all', 'winning', 'drawish', 'losing',
             'opening', 'middlegame', 'endgame',
@@ -212,14 +213,16 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
 
         nodes = self._get_nodes(board, game, position_idx)
         value = self._get_wdl(board, game, position_idx)
+        qvalue = self._get_qvalue(board.turn, game, position_idx)
         sample = process_item(
             board,
             nodes,
             self.encoding,
             self.temperature,
-            value=value
+            value=value,
+            qvalue=qvalue,
         )
-        sample[1]['value_mask'] = torch.ones((), dtype=torch.float)
+        sample[1]['value_mask'] = torch.ones((), dtype=torch.bool)
         return sample
 
 
@@ -250,7 +253,7 @@ class LichessPuzzlesDataset(PositionDataset):
         else:
             raise ValueError(f'LichessPuzzleDataset: split should be train or valid, received {split}')
 
-        selected_themes = self.TAGS + ('',)
+        selected_themes = self.TAGS | {''}
 
         self.dataset = self.dataset.select(selected).map(
             lambda x: {
@@ -302,7 +305,7 @@ class LichessPuzzlesDataset(PositionDataset):
                 self.temperature,
                 value=return_value,
             )
-            sample[1]['value_mask'] = torch.zeros((), dtype=torch.float)
+            sample[1]['value_mask'] = torch.zeros((), dtype=torch.bool)
             return sample
 
         board_, extra_ = encode_board(board, self.encoding)

@@ -31,6 +31,11 @@ class ChessModel(nn.Module):
 
         self.policy_head = PolicyHead(model_config.hidden_size, cls_loss_fn)
         self.value_head = ValueHead(model_config.hidden_size, reg_loss_fn)
+        self.qvalue_head = ValueHead(
+            model_config.hidden_size,
+            nn.SmoothL1Loss(),
+            output_dim=1,
+        )
 
     def forward(
             self,

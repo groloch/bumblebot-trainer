@@ -85,6 +85,7 @@ class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
             seed: int = 0
         ):
         super().__init__(encoding)
+        WdlDataset.__init__(self)
 
         self.min_moves = min_moves
 
@@ -127,4 +128,12 @@ class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
 
                 nodes = self._get_nodes(board, item, move_idx)
                 value = self._get_wdl(board, item, move_idx)
-                return process_item(board, nodes, self.encoding, self.temperature, value=value)
+                qvalue = self._get_qvalue(board.turn, item, move_idx)
+                yield process_item(
+                    board,
+                    nodes,
+                    self.encoding,
+                    self.temperature,
+                    value=value,
+                    qvalue=qvalue,
+                )

@@ -12,6 +12,7 @@ import torch
 
 from ..config import StockfishEvaluationConfig, SSLModelConfig
 from ..modeling import ChessModel, SSLChessModel, PositionClassificationHeads
+from ..modeling.utils import load_model_state_dict
 from .onnx_policy import OnnxPolicyModel
 from .stockfish_game_worker import play_game_pair
 from ..utils import build_model_config, load_config_file
@@ -54,7 +55,7 @@ def _load_model_from_logdir(
         raise ValueError(f'Unsupported model type for Stockfish evaluation: {run_type!r}')
 
     state_dict = torch.load(checkpoint, map_location='cpu', weights_only=True)
-    model.load_state_dict(state_dict)
+    load_model_state_dict(model, state_dict)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     model.eval()
@@ -121,8 +122,9 @@ def _load_consortium(
 
         model_config = build_model_config(classifier_config['model'])
         router_base = SSLChessModel(SSLModelConfig(**vars(model_config)))
-        router_base.load_state_dict(
-            torch.load(base_checkpoint, map_location='cpu', weights_only=True)
+        load_model_state_dict(
+            router_base,
+            torch.load(base_checkpoint, map_location='cpu', weights_only=True),
         )
         router_base.to(device).eval()
 

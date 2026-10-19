@@ -11,6 +11,7 @@ from tqdm import tqdm
 import torch
 
 from ..modeling import PositionClassificationHeads, SSLChessModel
+from ..modeling.utils import load_model_state_dict
 from ..config import TournamentConfig, SSLModelConfig
 from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo_ratings
@@ -173,8 +174,9 @@ def _load_router_for_tournament(
         router_base = models[selected_base]
     else:
         router_base = SSLChessModel(SSLModelConfig(**vars(model_config)))
-        router_base.load_state_dict(
-            torch.load(base_checkpoint, map_location='cpu', weights_only=True)
+        load_model_state_dict(
+            router_base,
+            torch.load(base_checkpoint, map_location='cpu', weights_only=True),
         )
         router_base.to(device).eval()
     router_heads = PositionClassificationHeads(model_config.hidden_size)

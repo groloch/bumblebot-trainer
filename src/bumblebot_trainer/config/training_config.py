@@ -27,6 +27,7 @@ class TrainingConfig:
     name: str
     policy_loss_weight: float
     value_loss_weight: float
+    qvalue_loss_weight: float
     ssl_loss_weight: float
     perceptive_loss_weight: float
     dropout_schedule: DropoutScheduleConfig

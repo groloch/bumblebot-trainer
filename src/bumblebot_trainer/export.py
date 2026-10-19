@@ -8,6 +8,7 @@ import gguf
 from .utils import load_config_file, build_model_config
 from .training.utils import model_parameters
 from .modeling import ChessModel
+from .modeling.utils import load_model_state_dict
 
 
 _STEP_CKPT_RE = re.compile(r"^(?P<name>.+)_step(?P<step>\d+)\.pth$")
@@ -78,7 +79,7 @@ def _load_chess_model_from_run(logdir: Path, checkpoint_path: str | None):
     print(f'Loaded model of {params/1e6:.2f}M parameters')
 
     state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-    model.load_state_dict(state_dict)
+    load_model_state_dict(model, state_dict)
     model.eval()
 
     return model, config, config_path, ckpt_path

@@ -5,7 +5,7 @@ import torch.nn as nn
 from transformers import BertModel, BertConfig
 
 from .embedding import Embedding
-from .encoders import build_encoder
+from .encoders import build_encoder, EncoderOutput
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
@@ -14,10 +14,9 @@ from ..data.ssl.utils import SSLConstants
 
 class SSLChessModel(nn.Module):
     """Chess model for JEPA-like training with modulable training objectives.
-    This model has two training objectives: predicting the policy (move distribution) and
-    the position value.
-    Policy is a lc0-style attention policy head.
-    Value is a simple MLP regression head over the global (mean) embedding.
+    This model predicts the policy (move distribution), WDL value, and scalar qvalue.
+    Policy is a lc0-style attention policy head. Both value heads are MLP regressors over
+    the global (mean) embedding.
     """
     def __init__(self, config: SSLModelConfig, label_smoothing=0.2):
         super().__init__()
@@ -41,6 +40,11 @@ class SSLChessModel(nn.Module):
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,
             loss_fn=nn.SmoothL1Loss()
+        )
+        self.qvalue_head = ValueHead(
+            hidden_size=config.hidden_size,
+            loss_fn=nn.SmoothL1Loss(),
+            output_dim=1,
         )
 
     def forward(
@@ -82,16 +86,56 @@ class SSLChessModel(nn.Module):
 
         Args:
             x (torch.Tensor): input embeddings of shape (B, 64, hidden_size)
-            target (dict[str, torch.Tensor]): policy and value targets
+            target (dict[str, torch.Tensor]): policy, WDL value, and qvalue targets
 
         Returns:
-            dict[str, torch.Tensor]: logits for policy and value
-            dict[str, torch.Tensor]: losses for policy and value
+            dict[str, torch.Tensor]: logits for policy, WDL value, and qvalue
+            dict[str, torch.Tensor]: losses for policy, WDL value, and qvalue
         """
-        policy_out: PolicyOutput = self.policy_head(x, target['policy'])
-        value_out: ValueOutput = self.value_head(x.mean(dim=1), target['value'])
-        logits = {'policy': policy_out.logits, 'value': value_out.logits}
-        losses = {'policy': policy_out.loss, 'value': value_out.loss}
+        policy_indices = target.get('valid_policy_indices')
+        value_indices = target.get('valid_value_indices')
+        qvalue_indices = target.get('valid_qvalue_indices')
+        policy_embeddings = x if policy_indices is None else torch.index_select(x, 0, policy_indices)
+        value_embeddings = x if value_indices is None else torch.index_select(x, 0, value_indices)
+        qvalue_embeddings = x if qvalue_indices is None else torch.index_select(x, 0, qvalue_indices)
+
+        policy_targets = target['policy']
+        value_targets = target['value']
+        qvalue_targets = target.get('qvalue')
+        if policy_targets.shape[0] > 0:
+            policy_out: PolicyOutput = self.policy_head(policy_embeddings, policy_targets)
+            policy_logits = policy_out.logits
+            policy_loss = policy_out.loss
+        else:
+            policy_logits = x.new_empty((0, ChessConstants.NUM_POLICY_CLASSES))
+            policy_loss = policy_embeddings.sum() * 0.0
+
+        value_out: ValueOutput = self.value_head(
+            value_embeddings.mean(dim=1),
+            value_targets if value_targets.shape[0] > 0 else None,
+        )
+        value_loss = value_out.loss
+        if value_targets.shape[0] == 0:
+            value_loss = value_embeddings.sum() * 0.0
+
+        qvalue_out = self.qvalue_head(
+            qvalue_embeddings.mean(dim=1),
+            qvalue_targets.reshape(-1, 1) if qvalue_targets is not None and qvalue_targets.numel() else None,
+        )
+        qvalue_loss = qvalue_out.loss
+        if qvalue_targets is None or qvalue_targets.numel() == 0:
+            qvalue_loss = qvalue_embeddings.sum() * 0.0
+
+        logits = {
+            'policy': policy_logits,
+            'value': value_out.logits,
+            'qvalue': qvalue_out.logits,
+        }
+        losses = {
+            'policy': policy_loss,
+            'value': value_loss,
+            'qvalue': qvalue_loss,
+        }
         return logits, losses
 
 
