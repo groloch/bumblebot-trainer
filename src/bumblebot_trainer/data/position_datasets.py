@@ -1,12 +1,14 @@
 import json
 
 import numpy as np
+import torch
 from torch.utils.data import Dataset
 import chess
-from datasets import load_dataset
-from huggingface_hub import HfFileSystem
+from datasets import load_dataset, VerificationMode
+from datasets_sql import query as sql_query
 
 from .utils import process_item, get_game_phase, VariationNode
+from ..utils import eval_to_whitewinpercent
 
 
 class PositionDataset(Dataset):
@@ -36,6 +38,100 @@ class PositionDataset(Dataset):
 
     def __getitem__(self, index):
         raise NotImplementedError()
+
+
+class LichessEvalDataset(PositionDataset):
+    def __init__(self, encoding, split='train'):
+        super().__init__(encoding)
+        print('Preparing LichessEvalDataset')
+
+        data_files = [
+            'data/data_0000.parquet',
+            'data/data_0001.parquet',
+            # 'data/data_0002.parquet',
+            # 'data/data_0003.parquet',
+            # 'data/data_0004.parquet',
+            # 'data/data_0005.parquet',
+            # 'data/data_0006.parquet',
+            # 'data/data_0007.parquet',
+            # 'data/data_0008.parquet',
+            # 'data/data_0009.parquet',
+            # 'data/data_0010.parquet',
+            # 'data/data_0011.parquet',
+            # 'data/data_0012.parquet',
+            # 'data/data_0013.parquet',
+            # 'data/data_0014.parquet',
+            # 'data/data_0015.parquet',
+            # 'data/data_0016.parquet',
+        ]
+
+        if split == 'train':
+            selected = range(1_000_000, 30_000_000)
+        elif split == 'eval':
+            selected = range(500_000)
+
+        dataset = load_dataset(
+            'Lichess/chess-position-evaluations',
+            data_files=data_files,
+            split='train',
+            verification_mode=VerificationMode.NO_CHECKS,
+        )
+        dataset = dataset.shuffle().select(selected).flatten_indices(num_proc=16)
+
+        dataset = sql_query(
+        """
+            SELECT fen, LIST(line) as lines, LIST(depth) as depths, LIST(cp) as cps, LIST(mate) as mates
+            FROM dataset
+            GROUP BY fen
+            ORDER BY fen
+        """, load_from_cache_file=False
+        )
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        sample = self.dataset[index]
+        board = chess.Board(sample['fen'])
+        max_depth = max(sample['depths'])
+
+        scored_nodes = []
+        for line, cp, mate, depth in zip(
+            sample['lines'], sample['cps'], sample['mates'], sample['depths']
+        ):
+            if depth != max_depth or not line or (cp is None and mate is None):
+                continue
+
+            node = VariationNode(move=line.split()[0], cp=cp, mate=mate)
+            winpercent = eval_to_whitewinpercent(cp, mate)
+            if board.turn == chess.BLACK and winpercent != -100:
+                winpercent = 100.0 - winpercent
+            expected_result = winpercent / 100.0
+            scored_nodes.append((node, expected_result))
+
+        if not scored_nodes:
+            raise ValueError(f'LichessEvalDataset position {index} has no scored PV at max depth')
+
+        nodes = [node for node, _ in scored_nodes]
+        best_node, best_expected_result = max(scored_nodes, key=lambda item: item[1])
+        if best_node.mate is not None:
+            stockfish_cp = 1000.0 if best_expected_result >= 0.5 else -1000.0
+        else:
+            stockfish_cp = float(best_node.cp)
+            if board.turn == chess.BLACK:
+                stockfish_cp = -stockfish_cp
+        stockfish_cp = max(min(stockfish_cp, 1000.0), -1000.0)
+
+        tokens, targets, extra = process_item(
+            board, nodes, self.encoding, self.temperature
+        )
+        targets['stockfish_cp'] = torch.tensor(stockfish_cp, dtype=torch.float32)
+        targets['game_phase'] = torch.tensor(
+            ('opening', 'middlegame', 'endgame').index(get_game_phase(board)),
+            dtype=torch.long,
+        )
+        return tokens, targets, extra
 
 
 class CombinedPositionDataset(Dataset):
@@ -76,58 +172,3 @@ class SinglePositionDataset(PositionDataset):
 
     def __getitem__(self, index):
         return process_item(self.board, [], self.encoding, self.temperature)
-
-
-class Lc0PositionDataset(PositionDataset):
-    """Dataset of positions from lc0 T91 training chunks.
-    """
-
-    def __init__(self, directory: str, encoding: str):
-        super().__init__(encoding)
-
-        repo = 'Maxlegrec/test91-data'
-        hf_fs = HfFileSystem()
-        available_files = {
-            p.split('/')[-1]
-            for p in hf_fs.ls(f'datasets/{repo}', detail=False)
-        }
-        data_files = [
-            f for f in (
-                f'training-run2-test91-202511{d}-{x}{y}17.parquet'
-                for x in range(2)
-                for y in range(10)
-                for d in range(18, 22)
-            )
-            if f in available_files
-        ]
-
-        self.dataset = load_dataset(
-            repo,
-            split='train',
-            data_files=data_files
-        )
-
-        self.dataset = self.dataset.filter(
-            lambda x: get_game_phase(chess.Board(x['fen'])) != 'opening',
-            num_proc=16
-        )
-        self.dataset = self.dataset.shuffle()
-        n_pos = int(25e6)
-        self.dataset = self.dataset.select(range(n_pos))
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def __getitem__(self, index):
-        item = self.dataset[index]
-
-        board = chess.Board(item['fen'])
-
-        best_move_uci = item['best_move']
-        value = item['root_q']
-
-        node = VariationNode(
-            move=best_move_uci,
-            probability=1.0
-        )
-        return process_item(board, [node], self.encoding, value=value)

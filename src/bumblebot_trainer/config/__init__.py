@@ -4,3 +4,4 @@ from .modeling_configs import ModelConfig, EncoderConfig, SSLModelConfig, Predic
 from .data_config import SSLDataConfig
 from .evaluation_config import EvaluationConfig
 from .stockfish_evaluation_config import StockfishEvaluationConfig
+from .tournament_config import TournamentConfig

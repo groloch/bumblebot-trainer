@@ -16,6 +16,7 @@ from .onnx_policy import OnnxPolicyModel
 from .stockfish_game_worker import play_game_pair
 from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo
+from .consortium import PolicyConsortium
 
 
 def _resolve_checkpoint(logdir: Path, training_name: str, explicit_path: str | None) -> Path:
@@ -78,10 +79,10 @@ def _load_model_from_logdir(
 
     model_config = build_model_config(config['model'])
     run_type = config.get('type')
-    if run_type == 'ssl':
+    if run_type == 'ssl' or True:
         ssl_config = SSLModelConfig(**vars(model_config))
         model = SSLChessModel(ssl_config)
-    elif run_type in ('pv', 'pvtuner'):
+    elif run_type in ('pv', 'pv_finetune', 'pvtuner'):
         model = ChessModel(model_config)
     else:
         raise ValueError(f'Unsupported model type for Stockfish evaluation: {run_type!r}')
@@ -93,6 +94,145 @@ def _load_model_from_logdir(
     model.eval()
 
     return model, encoding, config, checkpoint, device
+
+
+def _resolve_path(path: str, base_dir: Path) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = base_dir / resolved
+    return resolved.resolve()
+
+
+def _load_run_config(logdir: Path) -> dict:
+    config_paths = sorted(logdir.glob('*.yaml')) + sorted(logdir.glob('*.yml'))
+    if len(config_paths) != 1:
+        raise RuntimeError(
+            f'Expected one config YAML file in {logdir}, found: '
+            + ', '.join(path.name for path in config_paths)
+        )
+    return load_config_file(str(config_paths[0]))
+
+
+def _load_consortium(
+    consortium_config: dict,
+    config_dir: Path,
+):
+    import torch
+
+    from ..config import SSLModelConfig
+    from ..modeling import PositionClassificationHeads, SSLChessModel
+
+    groups = consortium_config.get('expert_groups', [])
+    supported_groups = {'phase', 'activity', 'evaluation'}
+    if not groups or len(groups) != len(set(groups)) or not set(groups) <= supported_groups:
+        raise ValueError(
+            f'expert_groups must be a non-empty unique subset of {sorted(supported_groups)}'
+        )
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    router_base = None
+    router_heads = None
+    checkpoint_info = {'experts': {}}
+    encoding = None
+
+    if 'activity' in groups or 'evaluation' in groups:
+        router_config = consortium_config.get('router')
+        if router_config is None:
+            raise ValueError('Router paths are required for activity or evaluation groups')
+
+        classifier_logdir = _resolve_path(router_config['classification_logdir'], config_dir)
+        classifier_config = _load_run_config(classifier_logdir)
+        if classifier_config.get('type') != 'classification':
+            raise ValueError('The router run must use type: classification')
+
+        router_training = classifier_config.get('training', {})
+        classifier_checkpoint = router_config.get('classification_checkpoint')
+        if classifier_checkpoint is not None:
+            classifier_checkpoint = str(_resolve_path(classifier_checkpoint, classifier_logdir))
+        classifier_checkpoint = _resolve_checkpoint(
+            classifier_logdir,
+            router_training['name'],
+            classifier_checkpoint
+        )
+
+        base_logdir = _resolve_path(router_config['base_model_logdir'], config_dir)
+        base_config = _load_run_config(base_logdir)
+        if base_config.get('type') != 'ssl':
+            raise ValueError('The router base model must use type: ssl')
+
+        base_training = base_config.get('training', {})
+        base_checkpoint = router_config.get('base_model_checkpoint')
+        if base_checkpoint is not None:
+            base_checkpoint = str(_resolve_path(base_checkpoint, base_logdir))
+        base_checkpoint = _resolve_checkpoint(
+            base_logdir,
+            base_training['name'],
+            base_checkpoint
+        )
+
+        router_encoding = classifier_config['data']['encoding']
+        if base_config['data']['encoding'] != router_encoding:
+            raise ValueError('The router and its base model must use the same board encoding')
+        encoding = router_encoding
+
+        model_config = build_model_config(classifier_config['model'])
+        router_base = SSLChessModel(SSLModelConfig(**vars(model_config)))
+        router_base.load_state_dict(
+            torch.load(base_checkpoint, map_location='cpu', weights_only=True)
+        )
+        router_base.to(device).eval()
+
+        router_heads = PositionClassificationHeads(model_config.hidden_size)
+        router_heads.load_state_dict(
+            torch.load(classifier_checkpoint, map_location='cpu', weights_only=True)
+        )
+        router_heads.to(device).eval()
+        checkpoint_info['router_base'] = str(base_checkpoint)
+        checkpoint_info['router_heads'] = str(classifier_checkpoint)
+
+    expected_experts = {
+        'phase': ('opening', 'middlegame', 'endgame'),
+        'activity': ('strategical', 'tactical'),
+        'evaluation': ('winning', 'drawing', 'losing'),
+    }
+    experts = {}
+    for group in groups:
+        group_experts = consortium_config.get('experts', {}).get(group, {})
+        missing = set(expected_experts[group]) - set(group_experts)
+        if missing:
+            raise ValueError(f'Missing {group} experts: {sorted(missing)}')
+
+        experts[group] = {}
+        checkpoint_info['experts'][group] = {}
+        for expert_name in expected_experts[group]:
+            expert_spec = group_experts[expert_name]
+            if isinstance(expert_spec, str):
+                expert_logdir = _resolve_path(expert_spec, config_dir)
+                expert_checkpoint = None
+            else:
+                expert_logdir = _resolve_path(expert_spec['logdir'], config_dir)
+                expert_checkpoint = expert_spec.get('checkpoint')
+                if expert_checkpoint is not None:
+                    expert_checkpoint = str(_resolve_path(expert_checkpoint, expert_logdir))
+
+            model, expert_encoding, _, checkpoint, expert_device = _load_model_from_logdir(
+                expert_logdir,
+                expert_checkpoint
+            )
+            if encoding is None:
+                encoding = expert_encoding
+            elif encoding != expert_encoding:
+                raise ValueError(
+                    f'Expert {group}/{expert_name} uses encoding {expert_encoding!r}; '
+                    f'expected {encoding!r}'
+                )
+            if expert_device != device:
+                model.to(device)
+                model.eval()
+            experts[group][expert_name] = model
+            checkpoint_info['experts'][group][expert_name] = str(checkpoint)
+
+    return PolicyConsortium(router_base, router_heads, experts, groups), encoding, checkpoint_info, device
 
 
 def _load_standalone_onnx(
@@ -136,6 +276,9 @@ def _sample_stockfish_elo(rng: random.Random, ranges: list[list[int]]) -> int:
 
 
 def _evaluate_batch(model, device, batch: list[dict]) -> list[int]:
+    if isinstance(model, PolicyConsortium):
+        return model.predict_move_ids(batch, device)
+
     if isinstance(model, OnnxPolicyModel):
         tokens = np.stack([item['tokens'] for item in batch])
         extra_keys = set(batch[0]['extra'])
@@ -276,21 +419,25 @@ def run_stockfish_evaluation(
     onnx_checkpoint_path: str | None = None,
     book_path: str | None = None,
 ) -> dict:
-    if (logdir is None) == (onnx_checkpoint_path is None):
-        raise ValueError('Choose exactly one model source: --logdir or --onnx')
+    evaluation_config_path = Path(evaluation_config_path).expanduser().resolve()
+    raw_evaluation_config = load_config_file(str(evaluation_config_path))
+    evaluation_config = StockfishEvaluationConfig(**raw_evaluation_config)
+    _validate_config(evaluation_config)
+
+    model_sources = sum((logdir is not None, onnx_checkpoint_path is not None,
+                         evaluation_config.consortium is not None))
+    if model_sources != 1:
+        raise ValueError('Choose exactly one model source: --logdir, --onnx, or consortium config')
     if onnx_checkpoint_path is not None and checkpoint_path is not None:
         raise ValueError('--onnx cannot be combined with a logdir checkpoint override')
+    if evaluation_config.consortium is not None and checkpoint_path is not None:
+        raise ValueError('Consortium checkpoints are specified in the evaluation config')
 
     logdir_path = None
     if logdir is not None:
         logdir_path = Path(logdir).expanduser().resolve()
         if not logdir_path.is_dir():
             raise NotADirectoryError(f'Model logdir not found: {logdir_path}')
-
-    evaluation_config_path = Path(evaluation_config_path).expanduser().resolve()
-    raw_evaluation_config = load_config_file(str(evaluation_config_path))
-    evaluation_config = StockfishEvaluationConfig(**raw_evaluation_config)
-    _validate_config(evaluation_config)
 
     config_dir = evaluation_config_path.parent
     if book_path is not None:
@@ -319,6 +466,11 @@ def run_stockfish_evaluation(
             onnx_checkpoint_path, evaluation_config
         )
         device = None
+    elif evaluation_config.consortium is not None:
+        model, encoding, checkpoint, device = _load_consortium(
+            evaluation_config.consortium,
+            config_dir
+        )
     else:
         model, encoding, _, checkpoint, device = _load_model_from_logdir(
             logdir_path, checkpoint_path
@@ -414,9 +566,18 @@ def run_stockfish_evaluation(
     wins = sum(score == 1.0 for score in outcomes)
     draws = sum(score == 0.5 for score in outcomes)
     losses = sum(score == 0.0 for score in outcomes)
+    model_source = (
+        'standalone_onnx' if onnx_checkpoint_path is not None else
+        'consortium' if evaluation_config.consortium is not None else
+        'logdir'
+    )
     summary = {
-        'model_source': 'standalone_onnx' if onnx_checkpoint_path is not None else 'logdir',
-        'checkpoint': str(checkpoint),
+        'model_source': model_source,
+        'checkpoint': str(checkpoint) if isinstance(checkpoint, Path) else checkpoint,
+        'expert_groups': (
+            evaluation_config.consortium['expert_groups']
+            if evaluation_config.consortium is not None else None
+        ),
         'num_game_pairs': len(successful_pairs),
         'num_games': len(game_results),
         'wins': int(wins),
@@ -437,7 +598,12 @@ def run_stockfish_evaluation(
         if not results_path.is_absolute():
             results_path = (config_dir / results_path).resolve()
     else:
-        results_dir = logdir_path if logdir_path is not None else checkpoint.parent
+        if logdir_path is not None:
+            results_dir = logdir_path
+        elif evaluation_config.consortium is not None:
+            results_dir = config_dir
+        else:
+            results_dir = checkpoint.parent
         results_path = results_dir / 'stockfish_eval_results.json'
     results_path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = results_path.with_suffix(results_path.suffix + '.tmp')

@@ -1,4 +1,8 @@
-from .position_datasets import CombinedPositionDataset, SinglePositionDataset, Lc0PositionDataset
+from .position_datasets import (
+    CombinedPositionDataset,
+    LichessEvalDataset,
+    SinglePositionDataset,
+)
 from .game_datasets import (
     LichessStandardGamesDataset,
     Lc0GamesDataset,

@@ -28,7 +28,7 @@ from ..data import (
     T91GamesIterableSSLDataset,
     SSLCollator
 )
-from ..eval import PuzzleEvaluator
+from ..eval import EvaluationSuite
 from ..tracking import AccumulationBuffer, MetricLogger
 from ..tracking.metrics import (
     accuracy_from_stats,
@@ -224,7 +224,7 @@ class SSLTrainer:
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            shuffle=True,
+            # shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth)
@@ -237,14 +237,14 @@ class SSLTrainer:
 
         self.predictor.train()
         self.predictor.to(self.device)
-        self.predictor.compile(mode='max-autotune')
+        # self.predictor.compile(mode='max-autotune')
 
         self.teacher.eval()
         self.teacher.to(self.device)
-        self.teacher.compile(mode='max-autotune')
+        # self.teacher.compile(mode='max-autotune')
 
-        print('Loading puzzle evaluation dataset')
-        self.evaluator = PuzzleEvaluator(
+        print('Loading puzzle and Stockfish evaluation datasets')
+        self.evaluator = EvaluationSuite(
             model=self.model,
             config=self.eval_config,
             encoding=self.data_config.encoding,
@@ -293,7 +293,6 @@ class SSLTrainer:
 
             targets = {k: v.to(self.device, non_blocking=True) for k, v in targets.items()}
             target = {'policy': targets['policy'], 'value': targets['value']}
-            target_ = {'policy': targets['policy_'], 'value': targets['value_']}
 
             moves = moves.to(self.device, non_blocking=True)
             moves_attention_mask = moves_attention_mask.to(self.device, non_blocking=True)
@@ -306,7 +305,13 @@ class SSLTrainer:
             # jepa-like forward pass
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 with torch.no_grad():
-                    _, target_embed = self.teacher.module.embed(tokens_, **extra_)
+                    future_embed, target_embed = self.teacher.module.embed(tokens_, **extra_)
+                    future_policy_logits = self.teacher.module.policy_head(future_embed).logits
+                    future_value = self.teacher.module.value_head(future_embed.mean(dim=1)).logits
+                    perceptive_target = {
+                        'policy': F.softmax(future_policy_logits.float(), dim=-1),
+                        'value': future_value,
+                    }
 
                 student_embed, logits, losses = self.model(
                     tokens,
@@ -324,7 +329,7 @@ class SSLTrainer:
 
                 perceptive_logits, perceptive_losses = self.teacher.module.heads_out(
                     pred_raw,
-                    target=target_
+                    target=perceptive_target
                 )
 
                 policy_loss = losses['policy']
@@ -384,11 +389,11 @@ class SSLTrainer:
             )
             perceptive_policy_stats += accuracy_stats(
                 perceptive_policy_logits.detach(),
-                target_['policy']
+                perceptive_target['policy']
             )
             perceptive_policy_top3_stats += topk_accuracy_stats(
                 perceptive_policy_logits.detach(),
-                target_['policy']
+                perceptive_target['policy']
             )
 
             acc_buffer.update(
@@ -462,11 +467,18 @@ class SSLTrainer:
 
                 if step % self.eval_config.every == 0:
                     eval_metrics = self.evaluator.run(step)
+                    puzzle_metrics = eval_metrics['puzzle']
+                    stockfish_metrics = eval_metrics['stockfish']
                     pbar.write(
-                        f'[step {step}] puzzle Elo: {eval_metrics["puzzle/elo"]:.0f} '
-                        f'± {eval_metrics["puzzle/elo_std"]:.0f} | '
-                        f'solved: {eval_metrics["puzzle/solved_rate"]:.2%} | '
-                        f'move accuracy: {eval_metrics["puzzle/accuracy"]:.2%}'
+                        f'[step {step}] puzzle Elo: {puzzle_metrics["puzzle/elo"]:.0f} '
+                        f'± {puzzle_metrics["puzzle/elo_std"]:.0f} | '
+                        f'solved: {puzzle_metrics["puzzle/solved_rate"]:.2%} | '
+                        f'move accuracy: {puzzle_metrics["puzzle/accuracy"]:.2%} | '
+                        f'Stockfish policy accuracy: '
+                        f'{stockfish_metrics["stockfish/policy/accuracy"]:.2%} | '
+                        f'top-3: {stockfish_metrics["stockfish/policy/top3_accuracy"]:.2%} | '
+                        f'value MAE: '
+                        f'{stockfish_metrics["stockfish/value/expected_result_mae"]:.3f}'
                     )
 
                 if step >= self.training_config.max_steps:

@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 import chess
 import chess.engine
 
-from ..data.utils import encode_board
+from ..data.utils import encode_board, get_game_phase
 from ..utils import get_move_id
 
 
@@ -37,7 +37,11 @@ def _request_model_move(
     request_queue,
     response_queue,
 ) -> chess.Move:
-    tokens, extra = encode_board(board, encoding)
+    encoded = encode_board(board, encoding)
+    if isinstance(encoded, tuple):
+        tokens, extra = encoded
+    else:
+        tokens, extra = encoded, {}
     legal_moves = list(board.legal_moves)
     legal_ids = [get_move_id(move, board.turn) for move in legal_moves]
 
@@ -46,6 +50,7 @@ def _request_model_move(
         'tokens': tokens.numpy(),
         'extra': {key: value.numpy() for key, value in extra.items()},
         'legal_ids': legal_ids,
+        'phase': get_game_phase(board),
     })
     response = response_queue.get()
     if 'error' in response:

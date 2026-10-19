@@ -18,6 +18,7 @@ class StockfishEvaluationConfig:
     onnx_tokens_input: str | None = None
     onnx_legal_input: str | None = None
     onnx_policy_output: str | None = None
+    consortium: dict | None = None
     prior_elo_mean: float = 1500.0
     prior_elo_std: float = 1000.0
     elo_min: float = 200.0

@@ -2,6 +2,7 @@ from copy import deepcopy
 import yaml
 
 import numpy as np
+import torch
 import chess
 
 
@@ -36,16 +37,57 @@ def eval_to_whitewinpercent(cp: int, mate: int, magic=0.00368208):
     return max(min(winpercent, 100), 0)
 
 def whitewinpercent_to_cp(winpercent: float, magic=0.00368208):
-    """Converts position evaluation from win% (white's perspective) to centipawns according to:
-    https://lichess.org/page/accuracy
-    """
+    """Converts an expected result in [0, 1] to centipawns using Lichess' curve."""
     if winpercent <= 0:
-        return 1000
-    elif winpercent >= 1:
         return -1000
-    cp = -np.log(1 / winpercent - 1) / magic
+    elif winpercent >= 1:
+        return 1000
+    cp = np.log(winpercent / (1 - winpercent)) / magic
     cp = max(min(cp, 1000), -1000)
     return int(cp)
+
+
+def wdl_to_expected_result(
+    wdl: torch.Tensor,
+    *,
+    from_logits: bool = False,
+) -> torch.Tensor:
+    """Convert W/D/L model outputs to expected score (win + 0.5 * draw).
+
+    Cross-entropy heads produce logits; regression heads produce probability-like
+    values, which are clamped and renormalized. Scalar expected-result outputs are
+    passed through unchanged (apart from clipping to [0, 1]).
+    """
+    values = wdl.float()
+    if values.ndim == 0:
+        return values.clamp(0.0, 1.0)
+    if values.shape[-1] == 1:
+        return values.squeeze(-1).clamp(0.0, 1.0)
+    if values.shape[-1] != 3:
+        raise ValueError(f'Expected a scalar or W/D/L output, got shape {tuple(values.shape)}')
+
+    if from_logits:
+        probabilities = torch.softmax(values, dim=-1)
+    else:
+        probabilities = values.clamp_min(0.0)
+        mass = probabilities.sum(dim=-1, keepdim=True)
+        fallback = torch.softmax(values, dim=-1)
+        probabilities = torch.where(
+            mass > 1e-8,
+            probabilities / mass.clamp_min(1e-8),
+            fallback,
+        )
+    return probabilities[..., 0] + 0.5 * probabilities[..., 1]
+
+
+def expected_result_to_cp(
+    expected_result: torch.Tensor,
+    magic: float = 0.00368208,
+    max_cp: float = 1000.0,
+) -> torch.Tensor:
+    """Convert expected score in [0, 1] to centipawns via Lichess' curve."""
+    probability = expected_result.float().clamp(1e-6, 1.0 - 1e-6)
+    return (torch.logit(probability) / magic).clamp(-max_cp, max_cp)
 
 def get_move_id(move: chess.Move, turn:chess.Color):
     from_square = move.from_square

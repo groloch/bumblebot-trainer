@@ -244,10 +244,8 @@ class T91GamesDataset(GamePositionDataset):
         value = self._get_nearest_value(game['qvalues'], position_idx, 'qvalue')
         dvalue = self._get_nearest_value(game['dvalues'], position_idx, 'dvalue')
 
-        # qvalues are stored from White's perspective (prepare_data.py); convert
-        # to the side-to-move perspective before constructing the WDL target.
         if turn == chess.BLACK:
-            value = -value
+            value = 1-value
 
         win = (value + 1) / 2
         loss = 1 - win
@@ -325,16 +323,12 @@ class T91GamesDataset(GamePositionDataset):
 
 
 class LichessPuzzlesDataset(PositionDataset):
-    """Dataset of Lichess puzzles, flattened over all of their solution moves.
+    TAGS = (
+        'defensiveMove', 'zugzwang', 'sacrifice', 'mate', 'quietMove', 'fork',
+        'skewer', 'pin', 'intermezzo', 'clearance', 'attraction', 'xRayAttack',
+        'advancedPawn', 'opening', 'middlegame', 'endgame',
+    )
 
-    Each puzzle is a FEN plus a move list that starts with the opponent's setup
-    move, followed by the player's solution moves interleaved with forced
-    opponent replies. The player's moves are therefore at odd indices
-    (1, 3, 5, ...) and the list always ends on a player move.
-
-    The dataset exposes one position per player move: item ``idx`` is the
-    position in which the player has to find their ``move_idx``-th solution move.
-    """
     def __init__(self, encoding, split):
         super().__init__(encoding)
         if split not in ('train', 'valid'):
@@ -349,29 +343,26 @@ class LichessPuzzlesDataset(PositionDataset):
         else:
             raise ValueError(f'LichessPuzzleDataset: split should be train or valid, received {split}')
 
-        selected_themes = (
-            # Move type
-            'defensiveMove', 'zugzwang', 'sacrifice', 'mate', 'quietMove', 'fork',
-            'skewer', 'pin', 'intermezzo', 'clearance', 'attraction', 'xRayAttack',
-            'advancedPawn',
-
-            # Game phase
-            'opening', 'middlegame', 'endgame',
-            ''
-        )
+        selected_themes = self.TAGS + ('',)
 
         self.dataset = self.dataset.select(selected).map(
             lambda x: {
                 'fen': x['FEN'],
                 'moves': x['Moves'].split(' '),
                 'rating': x['Rating'],
-                'themes': [t for t in x['Themes'] if t in selected_themes],
+                'themes': [
+                    tag for tag in (
+                        x['Themes'].split()
+                        if isinstance(x['Themes'], str)
+                        else x['Themes']
+                    )
+                    if tag in selected_themes
+                ],
                 'puzzle_len': len(x['Moves'].split(' ')) // 2
             }, num_proc=16
         )
 
         self.puzzles_lengths = np.cumsum(self.dataset['puzzle_len'])
-        # number of solution (player) moves per puzzle, indexed by puzzle index
         self.puzzle_lens = np.diff(self.puzzles_lengths, prepend=0).astype(np.int64)
         self.num_puzzles = len(self.dataset)
         self.len = int(self.puzzles_lengths[-1])
@@ -408,13 +399,33 @@ class LichessPuzzlesDataset(PositionDataset):
             return sample
 
         board_, extra_ = encode_board(board, self.encoding)
-        move_ = torch.tensor(
-            get_move_id(chess.Move.from_uci(uci_move), board.turn), dtype=torch.long
+        turn = board.turn
+        move_id = get_move_id(chess.Move.from_uci(uci_move), turn)
+
+        mating_move_ids = []
+        for move in list(board.legal_moves):
+            board.push(move)
+            if board.is_checkmate():
+                mating_move_ids.append(get_move_id(move, turn))
+            board.pop()
+
+        acceptable_move_ids = sorted(set([move_id] + mating_move_ids))
+        confidence_move_ids = mating_move_ids or [move_id]
+        tags = torch.tensor(
+            [tag in puzzle['themes'] for tag in self.TAGS],
+            dtype=torch.bool,
         )
+
+        move_id_ = torch.tensor(move_id, dtype=torch.long)
+        acceptable_move_ids_ = torch.tensor(acceptable_move_ids, dtype=torch.long)
+        confidence_move_ids_ = torch.tensor(confidence_move_ids, dtype=torch.long)
         puzzle_idx_ = torch.tensor(puzzle_idx, dtype=torch.long)
         rating_ = torch.tensor(float(puzzle['rating']), dtype=torch.float32)
 
-        return board_, move_, puzzle_idx_, rating_, extra_
+        return (
+            board_, move_id_, puzzle_idx_, rating_, extra_,
+            acceptable_move_ids_, confidence_move_ids_, tags,
+        )
 
 
 class SingleGameDataset(PositionDataset):

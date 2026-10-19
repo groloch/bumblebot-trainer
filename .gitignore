@@ -1,6 +1,10 @@
 mlruns/
 logs/
 config/*.yaml
+!config/pv_finetuning_config.yaml
+!config/classification_config.yaml
+!config/consortium_stockfish_evaluation.yaml
+!config/tournament_config.yaml
 tb/
 _*.py
 !__init__.py
