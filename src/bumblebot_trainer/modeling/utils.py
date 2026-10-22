@@ -8,18 +8,24 @@ from typing import Optional
 
 
 def load_model_state_dict(model, state_dict):
-    """Load checkpoints while allowing legacy models to lack the qvalue head."""
-    incompatible = model.load_state_dict(state_dict, strict=False)
-    missing_keys = [
-        key for key in incompatible.missing_keys
-        if not key.startswith('qvalue_head.')
-    ]
-    if missing_keys or incompatible.unexpected_keys:
-        raise RuntimeError(
-            f'Incompatible model checkpoint; missing keys: {missing_keys}, '
-            f'unexpected keys: {incompatible.unexpected_keys}'
-        )
-    return incompatible
+    """Load a state dict into a model, requiring an exact key match."""
+    return model.load_state_dict(state_dict, strict=True)
+
+
+def load_teacher(model, state_dict):
+    """Load an EMA teacher checkpoint.
+    """
+    prefixed = {
+        key: value
+        for key, value in state_dict.items()
+        if key.startswith('module.')
+    }
+    if 'n_averaged' in state_dict and prefixed and len(prefixed) == len(state_dict) - 1:
+        state_dict = {
+            key[len('module.'):]: value
+            for key, value in prefixed.items()
+        }
+    return load_model_state_dict(model, state_dict)
 
 
 @dataclass
@@ -45,6 +51,5 @@ def ssl_to_pv_model(ssl_model):
 
     pv_model.encoder.load_state_dict(ssl_model.encoder.state_dict().copy())
     pv_model.embedding.load_state_dict(ssl_model.embedding.state_dict().copy())
-    pv_model.qvalue_head.load_state_dict(ssl_model.qvalue_head.state_dict().copy())
 
     return pv_model

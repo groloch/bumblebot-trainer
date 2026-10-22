@@ -28,7 +28,7 @@ class WdlDataset:
     """Utility function for datasets that have wdl value annotations
     """
     def __init__(self):
-        self.wdl_temp = 0.15
+        pass
 
     def _get_nodes(self, board: chess.Board, game, position_idx: int):
         legal_moves = sorted(move.uci() for move in board.legal_moves)
@@ -56,14 +56,7 @@ class WdlDataset:
                         return float(value)
         return 0.5
 
-    def _get_qvalue(self, turn: chess.Color, game, position_idx: int) -> float:
-        """Return the expected result from the side-to-move perspective."""
-        value = min(max(self._get_nearest_value(game['qvalues'], position_idx), 0.0), 1.0)
-        if turn == chess.BLACK:
-            value = 1.0 - value
-        return value
-
-    def _get_wdl(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
+    def _get_wdl_and_q(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
         """Convert expected result and draw chances to side-to-move WDL targets."""
         value = self._get_nearest_value(game['qvalues'], position_idx)
         dvalue = self._get_nearest_value(game['dvalues'], position_idx)
@@ -71,10 +64,11 @@ class WdlDataset:
         if turn == chess.BLACK:
             value = 1-value
 
-        win = (value + 1) / 2
-        loss = 1 - win
+        win = (1+value-dvalue)/2.0
+        loss = (1-value-dvalue)/2.0
         wdl = torch.as_tensor([win, dvalue, loss], dtype=torch.float)
-        return (wdl / self.wdl_temp).softmax(dim=-1)
+        q_value = torch.tensor(value)
+        return wdl, q_value
 
 
 def san_to_uci(movetext: str, start_fen: str = chess.STARTING_FEN, chess960: bool = True) -> list[str]:

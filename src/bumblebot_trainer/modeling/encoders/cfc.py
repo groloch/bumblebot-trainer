@@ -18,6 +18,7 @@ class FFN(nn.Module):
 
         self.linear1 = nn.Linear(hidden_size, intermediate_size)
         self.linear2 = nn.Linear(intermediate_size, hidden_size)
+        self.linear2.is_residual_tail = True
 
         self.norm = nn.LayerNorm(hidden_size)
 
@@ -51,6 +52,7 @@ class MHA(nn.Module):
 
         self.qkv = nn.Linear(hidden_size, hidden_size * 3)
         self.out_proj = nn.Linear(hidden_size, hidden_size)
+        self.out_proj.is_residual_tail = True # init helper
         self.norm = nn.LayerNorm(hidden_size)
 
         self.smolgen = Smolgen(

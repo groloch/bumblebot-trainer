@@ -78,7 +78,7 @@ class SSLCollator:
         )
 
         batch_size = len(moves_list)
-        max_len = 1 + self.max_lookahead
+        max_len = max((sequence.shape[0] for sequence in moves_list), default=1)
         moves = torch.zeros(
             (batch_size, max_len, SSLConstants.NUM_TOKENS_PER_MOVE),
             dtype=torch.long,
@@ -202,7 +202,7 @@ def encode_both_boards(
         qvalue_valid: bool | None = None,
         ssl_valid: bool = True
     ):
-    """Pre-processed a position and a list of moves for ssl training.
+    """Pre-processes a position and a list of moves for ssl training.
     Returns the encoded boards (current and after the move sequence), and the
     encoded move sequence (6 tokens per move). Also returns the policy and value targets.
     """

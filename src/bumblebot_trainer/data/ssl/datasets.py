@@ -29,12 +29,12 @@ class MixedSSLDataset(Dataset):
         self.weights /= self.weights.sum()
 
     def __len__(self):
-        return sum(len(dataset) for dataset in self.datasets)
+        return sum(len(dataset) for dataset in self.datasets) * 10
 
     def __getitem__(self, idx):
         dataset_idx = int(np.random.choice(len(self.datasets), p=self.weights))
         dataset = self.datasets[dataset_idx]
-        sample_idx = np.random.randint(len(dataset))
+        sample_idx = idx % len(dataset)
         return dataset[sample_idx]
 
 
@@ -276,12 +276,9 @@ class T91GamesSSLDataset(T91GamesDataset):
 
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth,
-            num_proc=16
+            num_proc=28
         )
         self.len = len(self.dataset)
-
-    def __len__(self):
-        return self.len * 1000
 
     def __getitem__(self, idx):
         idx = idx % self.len
@@ -307,10 +304,8 @@ class T91GamesSSLDataset(T91GamesDataset):
 
         nodes = self._get_nodes(board, game, position_idx)
         nodes_ = self._get_nodes(board_, game, target_position_idx)
-        value = self._get_wdl(board.turn, game, position_idx)
-        value_ = self._get_wdl(board_.turn, game, target_position_idx)
-        qvalue = self._get_qvalue(board.turn, game, position_idx)
-        qvalue_ = self._get_qvalue(board_.turn, game, target_position_idx)
+        value, qvalue = self._get_wdl_and_q(board.turn, game, position_idx)
+        value_, qvalue_ = self._get_wdl_and_q(board_.turn, game, target_position_idx)
 
         return encode_both_boards(
             board=board,

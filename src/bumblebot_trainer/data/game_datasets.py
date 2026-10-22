@@ -42,11 +42,12 @@ class LichessStandardGamesDataset(GamePositionDataset):
     """
     def __init__(self, min_moves, encoding: str):
         super().__init__(min_moves, encoding)
+        print('Preparing LichessStandardGamesDataset')
         data_files = [
             'data/year=2025/month=01/train-00000-of-00072.parquet',
-            'data/year=2025/month=01/train-00001-of-00072.parquet',
-            'data/year=2025/month=01/train-00002-of-00072.parquet',
-            'data/year=2025/month=01/train-00003-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00001-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00002-of-00072.parquet',
+            # 'data/year=2025/month=01/train-00003-of-00072.parquet',
 
             # 'data/year=2025/month=01/train-00004-of-00072.parquet',
             # 'data/year=2025/month=01/train-00005-of-00072.parquet',
@@ -119,6 +120,8 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             tag: str = 'all'):
         super().__init__(min_moves, encoding)
         WdlDataset.__init__(self)
+        print('Preparing T91GamesDataset')
+
         self.TAGS = {
             'all', 'winning', 'drawish', 'losing',
             'opening', 'middlegame', 'endgame',
@@ -174,8 +177,11 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             is_tactical = max_probability_percent > 60.0
             return is_tactical if self.tag == 'tactical' else not is_tactical
 
+    def __len__(self):
+        return self.len * 10
+
     def __getitem__(self, idx):
-        game = self.dataset[idx]
+        game = self.dataset[idx % self.len]
         moves = game['movelist'].split()
         fen = game['fen'] if game['fen'] is not None else chess.STARTING_FEN
         board = chess.Board(fen, chess960=True)
@@ -187,8 +193,6 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             len(game['dvalues']),
         )
         candidate_positions = list(range(self.min_moves, position_count))
-        if not candidate_positions:
-            raise ValueError(f'T91 game {idx} has no positions at/after min_moves={self.min_moves}')
 
         if self.tag == 'all':
             valid_positions = candidate_positions
@@ -198,13 +202,12 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             for position_idx, move in enumerate(moves[:position_count]):
                 if position_idx >= self.min_moves:
                     policy = np.asarray(game['policies'][position_idx])
-                    value = self._get_wdl(current_board.turn, game, position_idx)
+                    value, _ = self._get_wdl_and_q(current_board.turn, game, position_idx)
                     if self._match_tags(current_board, policy, value):
                         valid_positions.append(position_idx)
                 current_board.push_uci(move)
-
-        if not valid_positions:
-            valid_positions = candidate_positions
+            if len(valid_positions) == 0:
+                valid_positions = candidate_positions # replay
 
         position_idx = int(np.random.choice(valid_positions))
 
@@ -212,15 +215,13 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             board.push_uci(move)
 
         nodes = self._get_nodes(board, game, position_idx)
-        value = self._get_wdl(board, game, position_idx)
-        qvalue = self._get_qvalue(board.turn, game, position_idx)
+        wdl, q = self._get_wdl_and_q(board, game, position_idx)
         sample = process_item(
             board,
             nodes,
             self.encoding,
-            self.temperature,
-            value=value,
-            qvalue=qvalue,
+            value=wdl,
+            qvalue=q,
         )
         sample[1]['value_mask'] = torch.ones((), dtype=torch.bool)
         return sample
@@ -235,6 +236,7 @@ class LichessPuzzlesDataset(PositionDataset):
     """
     def __init__(self, encoding, split):
         super().__init__(encoding)
+        print('Preparing LichessPuzzlesDataset')
         if split not in ('train', 'valid'):
             raise ValueError(f'LichessPuzzlesDataset: split should be train or valid, received {split}')
         self.split = split

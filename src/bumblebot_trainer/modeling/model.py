@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from .encoders import Encoder, EncoderOutput, build_encoder
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from .embedding import Embedding
+from .init import init_weights
 from ..config.modeling_configs import ModelConfig
 
 
@@ -31,11 +32,7 @@ class ChessModel(nn.Module):
 
         self.policy_head = PolicyHead(model_config.hidden_size, cls_loss_fn)
         self.value_head = ValueHead(model_config.hidden_size, reg_loss_fn)
-        self.qvalue_head = ValueHead(
-            model_config.hidden_size,
-            nn.SmoothL1Loss(),
-            output_dim=1,
-        )
+        init_weights(self, n_layers=model_config.encoder_config.num_layers)
 
     def forward(
             self,

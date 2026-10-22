@@ -20,6 +20,7 @@ class Embedding(nn.Module):
             nn.Linear(intermediate_size, hidden_size),
             nn.LayerNorm(hidden_size)
         )
+        self.ffn[2].is_residual_tail = True # init helper
         self.positional_encoding = nn.Parameter(
             torch.zeros(ChessConstants.CONTEXT_LENGTH, hidden_size), requires_grad=True
         )

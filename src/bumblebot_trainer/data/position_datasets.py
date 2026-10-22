@@ -70,7 +70,7 @@ class LichessEvalDataset(PositionDataset):
         ]
 
         if split == 'train':
-            selected = range(1_000_000, 30_000_000)
+            selected = range(1_000_000, 5_000_000)
         elif split == 'valid':
             selected = range(500_000)
 

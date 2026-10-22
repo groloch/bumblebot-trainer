@@ -1,3 +1,4 @@
+import contextlib
 from dataclasses import dataclass
 
 import torch
@@ -7,6 +8,7 @@ from transformers import BertModel, BertConfig
 from .embedding import Embedding
 from .encoders import build_encoder, EncoderOutput
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
+from .init import init_weights
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
 from ..data.ssl.utils import SSLConstants
@@ -14,8 +16,8 @@ from ..data.ssl.utils import SSLConstants
 
 class SSLChessModel(nn.Module):
     """Chess model for JEPA-like training with modulable training objectives.
-    This model predicts the policy (move distribution), WDL value, and scalar qvalue.
-    Policy is a lc0-style attention policy head. Both value heads are MLP regressors over
+    This model predicts the policy (move distribution) and the WDL value.
+    Policy is a lc0-style attention policy head. The value head is an MLP classifier over
     the global (mean) embedding.
     """
     def __init__(self, config: SSLModelConfig, label_smoothing=0.2):
@@ -39,18 +41,15 @@ class SSLChessModel(nn.Module):
         )
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.SmoothL1Loss()
+            loss_fn=nn.CrossEntropyLoss()
         )
-        self.qvalue_head = ValueHead(
-            hidden_size=config.hidden_size,
-            loss_fn=nn.SmoothL1Loss(),
-            output_dim=1,
-        )
+        init_weights(self, n_layers=config.encoder_config.num_layers)
 
     def forward(
             self,
             x: torch.Tensor,
             target: dict[str, torch.Tensor] | None = None,
+            compute_losses: bool = True,
             **kwargs) -> tuple[torch.Tensor, torch.Tensor | None]:
 
         x, x_norm = self.embed(x, **kwargs)
@@ -58,7 +57,7 @@ class SSLChessModel(nn.Module):
         if target is None:
             return x_norm, None, None
 
-        logits, losses = self.heads_out(x, target)
+        logits, losses = self.heads_out(x, target, compute_losses=compute_losses)
         return x_norm, logits, losses
 
     def embed(self, x: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
@@ -80,61 +79,42 @@ class SSLChessModel(nn.Module):
     def heads_out(
             self,
             x: torch.Tensor,
-            target: dict[str, torch.Tensor]
+            target: dict[str, torch.Tensor],
+            compute_losses: bool = True
             ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-        """Computes the outputs of the heads
-
-        Args:
-            x (torch.Tensor): input embeddings of shape (B, 64, hidden_size)
-            target (dict[str, torch.Tensor]): policy, WDL value, and qvalue targets
-
-        Returns:
-            dict[str, torch.Tensor]: logits for policy, WDL value, and qvalue
-            dict[str, torch.Tensor]: losses for policy, WDL value, and qvalue
-        """
         policy_indices = target.get('valid_policy_indices')
         value_indices = target.get('valid_value_indices')
-        qvalue_indices = target.get('valid_qvalue_indices')
         policy_embeddings = x if policy_indices is None else torch.index_select(x, 0, policy_indices)
         value_embeddings = x if value_indices is None else torch.index_select(x, 0, value_indices)
-        qvalue_embeddings = x if qvalue_indices is None else torch.index_select(x, 0, qvalue_indices)
 
         policy_targets = target['policy']
         value_targets = target['value']
-        qvalue_targets = target.get('qvalue')
-        if policy_targets.shape[0] > 0:
-            policy_out: PolicyOutput = self.policy_head(policy_embeddings, policy_targets)
-            policy_logits = policy_out.logits
-            policy_loss = policy_out.loss
-        else:
-            policy_logits = x.new_empty((0, ChessConstants.NUM_POLICY_CLASSES))
-            policy_loss = policy_embeddings.sum() * 0.0
 
-        value_out: ValueOutput = self.value_head(
-            value_embeddings.mean(dim=1),
-            value_targets if value_targets.shape[0] > 0 else None,
-        )
-        value_loss = value_out.loss
-        if value_targets.shape[0] == 0:
-            value_loss = value_embeddings.sum() * 0.0
+        head_scope = contextlib.nullcontext() if compute_losses else torch.no_grad()
+        with head_scope:
+            if policy_targets.shape[0] > 0:
+                policy_out: PolicyOutput = self.policy_head(policy_embeddings, policy_targets)
+                policy_logits = policy_out.logits
+                policy_loss = policy_out.loss
+            else:
+                policy_logits = x.new_empty((0, ChessConstants.NUM_POLICY_CLASSES))
+                policy_loss = policy_embeddings.sum() * 0.0
 
-        qvalue_out = self.qvalue_head(
-            qvalue_embeddings.mean(dim=1),
-            qvalue_targets.reshape(-1, 1) if qvalue_targets is not None and qvalue_targets.numel() else None,
-        )
-        qvalue_loss = qvalue_out.loss
-        if qvalue_targets is None or qvalue_targets.numel() == 0:
-            qvalue_loss = qvalue_embeddings.sum() * 0.0
+            value_out: ValueOutput = self.value_head(
+                value_embeddings.mean(dim=1),
+                value_targets if value_targets.shape[0] > 0 else None,
+            )
+            value_loss = value_out.loss
+            if value_targets.shape[0] == 0:
+                value_loss = value_embeddings.sum() * 0.0
 
         logits = {
             'policy': policy_logits,
             'value': value_out.logits,
-            'qvalue': qvalue_out.logits,
         }
         losses = {
             'policy': policy_loss,
             'value': value_loss,
-            'qvalue': qvalue_loss,
         }
         return logits, losses
 
@@ -222,6 +202,7 @@ class Predictor(nn.Module):
         self.moves_embed = PredictorEmbedding(config)
 
         self.transformer = BertModel(bert_config)
+        init_weights(self, n_layers=config.num_layers)
 
     def forward(
         self,

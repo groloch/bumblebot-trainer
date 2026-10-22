@@ -296,7 +296,6 @@ class StockfishEvaluator:
                 squares, value_embedding = get_model_embeddings(self.model, tokens, extra)
                 policy_logits = self.model.policy_head(squares, None).logits
                 value_output = self.model.value_head(value_embedding, None).logits
-                qvalue_output = self.model.qvalue_head(value_embedding, None).logits
 
             policy_targets = targets['policy'].float()
             policy_targets = policy_targets.clamp_min(0.0)
@@ -340,15 +339,17 @@ class StockfishEvaluator:
             predicted_wdl_result = wdl_to_expected_result(
                 value_output,
                 from_logits=value_from_logits,
-            )
-            predicted_qvalue = qvalue_output.float().reshape(-1).clamp(0.0, 1.0)
-            target_qvalue = targets['qvalue'].float().reshape(-1).clamp(0.0, 1.0)
+            ).reshape(-1)
+            # q = w - l is derived from the same WDL distribution (q == 2*(w + 0.5*d) - 1
+            # over the softmax), replacing the removed qvalue head.
+            predicted_qvalue = (2.0 * predicted_wdl_result - 1.0).clamp(-1.0, 1.0)
+            target_qvalue = 2.0 * targets['qvalue'].float().reshape(-1) - 1.0
             stockfish_cp = targets['stockfish_cp'].float().reshape(-1)
 
             wdl_cp = expected_result_to_cp(predicted_wdl_result)
-            qvalue_cp = expected_result_to_cp(predicted_qvalue)
+            qvalue_cp = expected_result_to_cp((predicted_qvalue + 1.0) / 2.0)
             wdl_abs_error_sum += float(
-                (predicted_wdl_result - target_qvalue).abs().sum().item()
+                (predicted_wdl_result - targets['qvalue'].float().reshape(-1)).abs().sum().item()
             )
             wdl_cp_loss_sum += float((wdl_cp - stockfish_cp).abs().sum().item())
             qvalue_abs_error_sum += float(

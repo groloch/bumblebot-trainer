@@ -69,9 +69,14 @@ class MetricLogger:
         if len(names) == 0:
             return res
 
+        if self.use_mlflow:
+            # Batch all metrics into a single write instead of one round-trip per metric.
+            mlflow.log_metrics(
+                {name: self.metrics[name].get_value() for name in names},
+                step=step,
+            )
+
         for name in names:
-            if self.use_mlflow:
-                mlflow.log_metric(name, self.metrics[name].get_value(), step=step)
             if name.endswith('_avg') and not any(ex in name for ex in exclude_if_contains):
                 res += f'{name[:-4]}: {self.metrics[name]}  '
 

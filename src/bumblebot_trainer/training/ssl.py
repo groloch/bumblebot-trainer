@@ -84,7 +84,6 @@ class SSLTrainer(Trainer):
         # \ type hints
 
         print('Loading run configuration')
-        # Snapshot the raw config before _build_configs mutates it via pop().
         raw_config = copy.deepcopy(config)
         self._build_configs(config)
 
@@ -262,15 +261,13 @@ class SSLTrainer(Trainer):
 
         if self.data_config.streaming:
             dataset = MixedSSLIterableDataset(datasets, weights)
-            shuffle = False
         else:
             dataset = MixedSSLDataset(datasets, weights) if len(datasets) > 1 else datasets[0]
-            shuffle = False
 
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            shuffle=shuffle,
+            shuffle=True,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth),
@@ -349,28 +346,44 @@ class SSLTrainer(Trainer):
 
             extra['progress'] = step / self.training_config.max_steps
 
+            policy_weight = self.training_config.policy_loss_weight
+            value_weight = self.training_config.value_loss_weight
+            ssl_weight = self.training_config.ssl_loss_weight
+            perceptive_weight = self.training_config.perceptive_loss_weight
+
+            compute_student_losses = any(
+                w > 0 for w in (policy_weight, value_weight)
+            )
+            compute_perceptive_losses = compute_student_losses and perceptive_weight > 0
+
             # jepa-like forward pass
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
-                student_embed, logits, losses = self.model(
-                    tokens,
-                    target=target,
-                    **extra
-                )
-
                 if valid_ssl_indices.numel() > 0:
                     with torch.no_grad():
                         future_embed, target_embed = self.teacher.module.embed(tokens_, **extra_)
                         future_policy_logits = self.teacher.module.policy_head(future_embed).logits
                         future_value = self.teacher.module.value_head(future_embed.mean(dim=1)).logits
-                        future_qvalue = self.teacher.module.qvalue_head(
-                            future_embed.mean(dim=1)
-                        ).logits
-                        perceptive_target = {
-                            'policy': F.softmax(future_policy_logits.float(), dim=-1),
-                            'value': future_value,
-                            'qvalue': future_qvalue,
-                        }
+                        if compute_perceptive_losses:
+                            perceptive_target = {
+                                'policy': F.softmax(future_policy_logits.float(), dim=-1),
+                                'value': F.softmax(future_value.float(), dim=-1),
+                            }
+                        else:
+                            perceptive_target = {
+                                'policy': future_policy_logits,
+                                'value': future_value,
+                            }
+                else:
+                    target_embed = None
 
+                student_embed, logits, losses = self.model(
+                    tokens,
+                    target=target,
+                    compute_losses=compute_student_losses,
+                    **extra
+                )
+
+                if valid_ssl_indices.numel() > 0:
                     ssl_student_embed = torch.index_select(student_embed, 0, valid_ssl_indices)
                     pred_raw, pred_norm = self.predictor(
                         ssl_student_embed,
@@ -378,21 +391,20 @@ class SSLTrainer(Trainer):
                         moves_attention_mask,
                         self._current_dropout
                     )
-                    ssl_loss = F.smooth_l1_loss(pred_norm, target_embed.detach(), beta=0.1)
+                    ssl_loss = (1 - F.cosine_similarity(pred_norm, target_embed.detach(), dim=-1)).mean()
 
                     perceptive_logits, perceptive_losses = self.teacher.module.heads_out(
                         pred_raw,
-                        target=perceptive_target
+                        target=perceptive_target,
+                        compute_losses=compute_perceptive_losses
                     )
                     perceptive_policy_loss = perceptive_losses['policy']
                     perceptive_policy_logits = perceptive_logits['policy']
                     perceptive_value_loss = perceptive_losses['value']
-                    perceptive_qvalue_loss = perceptive_losses['qvalue']
                 else:
                     ssl_loss = student_embed.sum() * 0.0
                     perceptive_policy_loss = student_embed.sum() * 0.0
                     perceptive_value_loss = student_embed.sum() * 0.0
-                    perceptive_qvalue_loss = student_embed.sum() * 0.0
                     perceptive_policy_logits = logits['policy'].new_empty(
                         (0, logits['policy'].shape[-1])
                     )
@@ -402,20 +414,20 @@ class SSLTrainer(Trainer):
 
                 policy_loss = losses['policy']
                 value_loss = losses['value']
-                qvalue_loss = losses['qvalue']
 
-                total_loss = ssl_loss / gradient_accumulation_steps * self.training_config.ssl_loss_weight
+                total_loss = ssl_loss / gradient_accumulation_steps * ssl_weight
 
-                total_loss += policy_loss / gradient_accumulation_steps * self.training_config.policy_loss_weight
-                total_loss += value_loss / gradient_accumulation_steps * self.training_config.value_loss_weight
-                total_loss += qvalue_loss / gradient_accumulation_steps * self.training_config.qvalue_loss_weight
+                if policy_weight:
+                    total_loss += policy_loss / gradient_accumulation_steps * policy_weight
+                if value_weight:
+                    total_loss += value_loss / gradient_accumulation_steps * value_weight
 
-                total_loss += perceptive_policy_loss / gradient_accumulation_steps * \
-                    self.training_config.policy_loss_weight * self.training_config.perceptive_loss_weight
-                total_loss += perceptive_value_loss / gradient_accumulation_steps * \
-                    self.training_config.value_loss_weight * self.training_config.perceptive_loss_weight
-                total_loss += perceptive_qvalue_loss / gradient_accumulation_steps * \
-                    self.training_config.qvalue_loss_weight * self.training_config.perceptive_loss_weight
+                if perceptive_weight:
+                    perceptive_scale = perceptive_weight / gradient_accumulation_steps
+                    if policy_weight:
+                        total_loss += perceptive_policy_loss * perceptive_scale * policy_weight
+                    if value_weight:
+                        total_loss += perceptive_value_loss * perceptive_scale * value_weight
 
             total_loss.backward()
 
@@ -442,12 +454,6 @@ class SSLTrainer(Trainer):
             acc_buffer.update(
                 'value_loss',
                 value_loss.detach() * self.training_config.value_loss_weight,
-                partial_step
-            )
-            acc_buffer.update('qvalue_loss_unscaled', qvalue_loss.detach(), partial_step)
-            acc_buffer.update(
-                'qvalue_loss',
-                qvalue_loss.detach() * self.training_config.qvalue_loss_weight,
                 partial_step
             )
 
@@ -478,15 +484,6 @@ class SSLTrainer(Trainer):
                     self.training_config.value_loss_weight * self.training_config.perceptive_loss_weight,
                 partial_step
             )
-            acc_buffer.update(
-                'perceptive_qvalue_loss_unscaled', perceptive_qvalue_loss.detach(),
-                partial_step
-            )
-            acc_buffer.update(
-                'perceptive_qvalue_loss', perceptive_qvalue_loss.detach() * \
-                    self.training_config.qvalue_loss_weight * self.training_config.perceptive_loss_weight,
-                partial_step
-            )
             # \ metrics
 
             if (partial_step + 1) % gradient_accumulation_steps == 0:
@@ -498,6 +495,8 @@ class SSLTrainer(Trainer):
                 self._optimizer_step()
 
                 self.teacher.update_parameters(self.model)
+
+                torch.cuda.synchronize()
 
                 # tracking
                 self.logger.update('lr', self.adamw_scheduler.get_last_lr()[0])
@@ -513,8 +512,6 @@ class SSLTrainer(Trainer):
 
                 self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
                 self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
-                self.logger.update('qvalue_loss_unscaled', acc_buffer.get_mean('qvalue_loss_unscaled'))
-                self.logger.update('qvalue_loss', acc_buffer.get_mean('qvalue_loss'))
 
                 self.logger.update(
                     'perceptive_policy_loss_unscaled',
@@ -536,14 +533,6 @@ class SSLTrainer(Trainer):
                     acc_buffer.get_mean('perceptive_value_loss_unscaled')
                 )
                 self.logger.update('perceptive_value_loss', acc_buffer.get_mean('perceptive_value_loss'))
-                self.logger.update(
-                    'perceptive_qvalue_loss_unscaled',
-                    acc_buffer.get_mean('perceptive_qvalue_loss_unscaled')
-                )
-                self.logger.update(
-                    'perceptive_qvalue_loss',
-                    acc_buffer.get_mean('perceptive_qvalue_loss')
-                )
                 # \ tracking
 
                 acc_buffer.reset()
@@ -565,14 +554,12 @@ class SSLTrainer(Trainer):
                         f'[step {step}] puzzle Elo: {puzzle_metrics["puzzle/elo"]:.0f} '
                         f'± {puzzle_metrics["puzzle/elo_std"]:.0f} | '
                         f'solved: {puzzle_metrics["puzzle/solved_rate"]:.2%} | '
-                        f'move accuracy: {puzzle_metrics["puzzle/accuracy"]:.2%} | '
+                        f'move accuracy: {puzzle_metrics["puzzle/move_accuracy"]:.2%} | '
                         f'Stockfish policy accuracy: '
                         f'{stockfish_metrics["stockfish/policy/accuracy"]:.2%} | '
                         f'top-3: {stockfish_metrics["stockfish/policy/top3_accuracy"]:.2%} | '
                         f'WDL MAE: '
-                        f'{stockfish_metrics["stockfish/wdl/expected_result_mae"]:.3f} | '
-                        f'qvalue MAE: '
-                        f'{stockfish_metrics["stockfish/qvalue/expected_result_mae"]:.3f}'
+                        f'{stockfish_metrics["stockfish/wdl/expected_result_mae"]:.3f}'
                     )
 
                 if step >= self.training_config.max_steps:

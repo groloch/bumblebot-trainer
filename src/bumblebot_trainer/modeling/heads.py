@@ -80,6 +80,7 @@ class ValueHead(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size, output_dim)
         )
+        self.value_proj[2].is_value_final = True # init helper
 
         self.loss_fn = loss_fn
 

@@ -13,6 +13,7 @@ from ..config import (
     EvaluationConfig,
     SSLModelConfig,
     TrackingConfig,
+    TrainingConfig
 )
 from ..data import (
     CombinedPositionDataset,
@@ -33,7 +34,7 @@ from .utils import init_logdir, init_run, model_parameters, wsd_schedule, Traine
 
 
 class PVTrainer(Trainer):
-    """Trainer for policy-value training. Currently only used for fine-tuning a ssl-pretrained model.
+    """Trainer for policy-value-only training.
     """
     def __init__(self, config, config_path):
         print('Loading run configuration')
@@ -65,7 +66,7 @@ class PVTrainer(Trainer):
         self.training_config = config['training']
         self.data_config = config['data']
         self.model_config_dict = config['model']
-        self.pretrained_config = config['pretrained']
+        self.pretrained_config = config.get('pretrained')
         self.tracking_config = TrackingConfig(**config['tracking'])
         self.eval_config = EvaluationConfig(**config.get('evaluation', {}))
 
@@ -80,22 +81,31 @@ class PVTrainer(Trainer):
             encoder_config=encoder_config,
             **model_config,
         )
-        self.model = SSLChessModel(self.model_config, label_smoothing=0)
 
-        if hasattr(self.model.encoder, 'layer_dropout'):
+        checkpoint = (
+            self.pretrained_config.get('checkpoint')
+            if self.pretrained_config is not None
+            else None
+        )
+        label_smoothing = 0.2 if checkpoint is None else 0
+        self.model = SSLChessModel(self.model_config, label_smoothing=label_smoothing)
+
+        if checkpoint is not None:
+            checkpoint_path = checkpoint
+            if not os.path.isabs(checkpoint_path):
+                checkpoint_path = os.path.join(
+                    self.pretrained_config.get('logdir', ''), checkpoint_path
+                )
+            if not os.path.isfile(checkpoint_path):
+                raise FileNotFoundError(f'Pretrained checkpoint not found: {checkpoint_path}')
+            state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+            if isinstance(state, dict) and 'state_dict' in state:
+                state = state['state_dict']
+            load_model_state_dict(self.model, state)
+            print(f'Loaded pretrained weights from {checkpoint_path}')
+
+        if hasattr(self.model.encoder, 'layer_dropout') and checkpoint is not None:
             self.model.encoder.layer_dropout = False
-
-        checkpoint_path = self.pretrained_config['checkpoint']
-        if not os.path.isabs(checkpoint_path):
-            checkpoint_path = os.path.join(self.pretrained_config['logdir'], checkpoint_path)
-        if not os.path.isfile(checkpoint_path):
-            raise FileNotFoundError(f'Pretrained checkpoint not found: {checkpoint_path}')
-
-        state = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-        if isinstance(state, dict) and 'state_dict' in state:
-            state = state['state_dict']
-        load_model_state_dict(self.model, state)
-        print(f'Loaded pretrained weights from {checkpoint_path}')
 
     def _load_datasets(self):
         tag = self.data_config.get('tag', 'all').lower()
@@ -217,15 +227,15 @@ class PVTrainer(Trainer):
             targets = {key: value.to(self.device, non_blocking=True) for key, value in targets.items()}
             extra = {key: value.to(self.device, non_blocking=True) for key, value in extra.items()}
 
+            extra['progress'] = step / max_steps
+
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 _, logits, losses = self.model(tokens, target=targets, **extra)
                 policy_loss = losses['policy']
                 value_loss = losses['value']
-                qvalue_loss = losses['qvalue']
                 total_loss = (
                     policy_loss * self.training_config['policy_loss_weight']
                     + value_loss * self.training_config['value_loss_weight']
-                    + qvalue_loss * self.training_config['qvalue_loss_weight']
                 ) / gradient_accumulation_steps
 
             total_loss.backward()
@@ -240,12 +250,6 @@ class PVTrainer(Trainer):
             acc_buffer.update(
                 'value_loss',
                 value_loss.detach() * self.training_config['value_loss_weight'],
-                partial_step,
-            )
-            acc_buffer.update('qvalue_loss_unscaled', qvalue_loss.detach(), partial_step)
-            acc_buffer.update(
-                'qvalue_loss',
-                qvalue_loss.detach() * self.training_config['qvalue_loss_weight'],
                 partial_step,
             )
             policy_stats += accuracy_stats(logits['policy'].detach(), targets['policy'])
@@ -267,8 +271,6 @@ class PVTrainer(Trainer):
             self.logger.update('policy_top3_accuracy', accuracy_from_stats(policy_top3_stats).item())
             self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
             self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
-            self.logger.update('qvalue_loss_unscaled', acc_buffer.get_mean('qvalue_loss_unscaled'))
-            self.logger.update('qvalue_loss', acc_buffer.get_mean('qvalue_loss'))
 
             acc_buffer.reset()
             policy_stats.zero_()
@@ -283,7 +285,7 @@ class PVTrainer(Trainer):
                     f'[step {step}] puzzle Elo: {eval_metrics["puzzle/elo"]:.0f} '
                     f'± {eval_metrics["puzzle/elo_std"]:.0f} | '
                     f'solved: {eval_metrics["puzzle/solved_rate"]:.2%} | '
-                    f'move accuracy: {eval_metrics["puzzle/accuracy"]:.2%}'
+                    f'move accuracy: {eval_metrics["puzzle/move_accuracy"]:.2%}'
                 )
 
             if step >= max_steps:
@@ -291,7 +293,7 @@ class PVTrainer(Trainer):
 
             if step >= 100 and step % 10 == 0:
                 pbar.set_description(
-                    f'PV Fine-tuning | {self.logger.log(step, exclude_if_contains=["unscaled"])}'
+                    f'PV Training | {self.logger.log(step, exclude_if_contains=["unscaled"])}'
                 )
 
             if step % self.training_config['save_every'] == 0:
