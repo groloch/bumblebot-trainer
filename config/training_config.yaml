@@ -22,16 +22,15 @@ training:
   max_grad_norm: 2.0
   seed: 34657
   gradient_accumulation_steps: 1
-  num_workers: 16
+  num_workers: 8
   logdir: "logs"
   save_every: 10000
   ema_decay: 0.999
   name: "bumblebot-ssl"
   policy_loss_weight: 1.0
-  value_loss_weight: 0.3
-  qvalue_loss_weight: 0.3
-  ssl_loss_weight: 0.5
-  perceptive_loss_weight: 1.0
+  value_loss_weight: 1.0
+  ssl_loss_weight: 1.0
+  perceptive_loss_weight: 0.5
   dropout_schedule:
     min_dropout: 0.4
     max_dropout: 0.4
@@ -39,14 +38,14 @@ training:
     policy_accuracy_threshold: 0.8
     min_steps_between_updates: 50
 data:
-  min_moves: 30
+  min_moves: 20
   max_prediction_depth: 10
-  encoding: 'simplified'
+  encoding: 'lc0'
   dataset_mix:
-    t91: 0.4
+    t91: 0.9
+    # lichess_eval: 1.
+    lichess: 0.05
     puzzles: 0.05
-    lichess: 0.25
-    lichess_eval: 0.3
   streaming: false
   min_elo: 1600
 evaluation:

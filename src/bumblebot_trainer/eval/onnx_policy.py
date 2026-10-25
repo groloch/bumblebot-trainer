@@ -1,20 +1,7 @@
 from pathlib import Path
+from functools import lru_cache
 
 import numpy as np
-
-"""
-TODO: 
-- validate this against lc0 BT ckpts
-- check this works inside tournaments for direct comparison
-- check this works on the evaluation suite for indirect comparison
-
-More:
-- lc0 board encoding might be slightly different than 'lc0' encoding in data/utils/encode_board,
-especially on repetitions detection which may be different than python-chess
-- lc0 policy outputs are different, especially on promotion, where here we use default promotion as
-queen, and they use knight
-- lc0 models have 3 policy heads, of which two can be used for play
-"""
 
 class OnnxPolicyModel:
     """Run a policy ONNX graph and return its logits for batched board inputs.
