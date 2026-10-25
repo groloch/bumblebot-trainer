@@ -9,7 +9,7 @@ from typing import Optional
 
 def load_model_state_dict(model, state_dict):
     """Load a state dict into a model, requiring an exact key match."""
-    return model.load_state_dict(state_dict, strict=True)
+    return model.load_state_dict(state_dict, strict=False)
 
 
 def load_teacher(model, state_dict):

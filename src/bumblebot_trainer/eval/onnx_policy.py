@@ -55,7 +55,9 @@ class OnnxPolicyModel:
         providers = [preferred_provider]
         if preferred_provider != 'CPUExecutionProvider' and 'CPUExecutionProvider' in available:
             providers.append('CPUExecutionProvider')
-        self.session = ort.InferenceSession(str(checkpoint_path), providers=providers)
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = 4
+        self.session = ort.InferenceSession(str(checkpoint_path), sess_options=options, providers=providers)
         self.providers = self.session.get_providers()
         inputs = self.session.get_inputs()
         if not inputs:
@@ -208,3 +210,95 @@ class OnnxPolicyModel:
                 f'Expected policy logits shaped [batch, classes], got {output.shape}'
             )
         return output
+
+
+@lru_cache(maxsize=2)
+def _lc0_encoder(input_format):
+    import backends
+    return backends.Backend(backend='random', options=f'input_mode={input_format}')
+
+
+def encode_lc0_position(board, input_format: int) -> dict:
+    """Use LC0's encoder and move indices, preserving history and Chess960.
+
+    Requires LC0's ``backends`` Python extension. Input format comes from the
+    source weights, not Bumblebot's superficially similar ``lc0`` encoding.
+    Canonical formats need transformed policy indices and are rejected until
+    the upstream binding exposes the encoder's transform.
+    """
+    import chess
+    import backends
+    from ..utils import get_move_id
+
+    if input_format not in (1, 2):
+        raise ValueError(f'Unsupported LC0 input format {input_format}; expected 1 or 2')
+    encoder = _lc0_encoder(input_format)
+    root = board.root()
+    state = backends.GameState(root.fen(), [m.uci() for m in board.move_stack], board.chess960)
+    encoded = state.as_input(encoder)
+    masks = np.asarray([encoded.mask(i) for i in range(112)], dtype=np.uint64)
+    bits = (masks[:, None] >> np.arange(64, dtype=np.uint64)) & 1
+    values = np.asarray([encoded.val(i) for i in range(112)], dtype=np.float32)
+    tokens = (bits * values[:, None]).astype(np.float32).reshape(112, 8, 8)
+    moves = [chess.Move.from_uci(uci) for uci in state.moves()]
+    # Map actual legal moves, rather than reusing from/to slots. In LC0 the
+    # unsuffixed slot is knight promotion and q/r/b have explicit slots;
+    # Bumblebot instead stores queen in from/to and r/b/n in extra slots.
+    move_ids = np.asarray([get_move_id(m, board.turn) for m in moves], dtype=np.int64)
+    indices = np.asarray(state.policy_indices(), dtype=np.int64)
+    if set(moves) != set(board.legal_moves):
+        raise ValueError('LC0 and python-chess disagree on legal moves')
+    return {'tokens': tokens, 'extra': {'lc0_move_ids': move_ids, 'lc0_policy_indices': indices}}
+
+
+class Lc0OnnxPolicyModel(OnnxPolicyModel):
+    """LC0 NCHW 112-plane graph with an 1858-entry policy output.
+
+    LC0's exporter selects a policy head (vanilla by default); auxiliary WDL
+    and moves-left outputs are ignored. Legal outputs are remapped into
+    Bumblebot's 4288-entry space, with all other entries masked out.
+    """
+
+    def __init__(self, checkpoint_path, *, input_format: int, policy_output=None, runtime='onnxruntime'):
+        if input_format not in (1, 2):
+            raise ValueError('LC0 adapter currently supports input formats 1 and 2')
+        self.input_format = input_format
+        super().__init__(checkpoint_path, 112, policy_output=policy_output or '/output/policy')
+        metadata = self.input_metadata[self.tokens_input]
+        if len(metadata.shape) != 4 or tuple(metadata.shape[1:]) != (112, 8, 8):
+            raise ValueError(f'Expected LC0 input [batch,112,8,8], got {metadata.shape}')
+        output = next(o for o in self.session.get_outputs() if o.name == self.policy_output)
+        if len(output.shape) != 2 or output.shape[1] != 1858:
+            raise ValueError(f'Expected LC0 policy [batch,1858], got {output.shape}')
+        self.torch_model = None
+        if runtime == 'pytorch':
+            import onnx
+            import torch
+            from onnx2pytorch import ConvertModel
+            if not torch.cuda.is_available():
+                raise RuntimeError('The LC0 pytorch runtime requires a CUDA/ROCm GPU')
+            graph = onnx.load(str(checkpoint_path))
+            self.output_index = [o.name for o in graph.graph.output].index(self.policy_output)
+            self.torch_model = ConvertModel(graph, experimental=True).eval().cuda()
+            self.providers = ['PyTorch CUDA/ROCm (onnx2pytorch)']
+        elif runtime != 'onnxruntime':
+            raise ValueError(f'Unknown LC0 ONNX runtime: {runtime}')
+
+    def _run(self, tokens, extra):
+        if self.torch_model is None:
+            return super()._run(tokens, extra)
+        import torch
+        with torch.inference_mode():
+            output = self.torch_model(torch.from_numpy(tokens).cuda())
+        if isinstance(output, (tuple, list)):
+            output = output[self.output_index]
+        return output.float().cpu().numpy()
+
+    def predict_positions(self, positions):
+        tokens = np.stack([position['tokens'] for position in positions])
+        raw = super().predict(tokens, {})
+        logits = np.full((len(positions), 4288), -np.inf, dtype=np.float32)
+        for row, position in enumerate(positions):
+            extra = position['extra']
+            logits[row, extra['lc0_move_ids']] = raw[row, extra['lc0_policy_indices']]
+        return logits

@@ -33,11 +33,11 @@ class SSLChessModel(nn.Module):
             config.encoder_name,
             config=config.encoder_config,
             use_legal_embeds=True,
-            per_layer_posembeds=True
+            per_layer_posembeds=True,
         )
         self.policy_head = PolicyHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+            loss_fn=nn.CrossEntropyLoss(label_smoothing=label_smoothing),
         )
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,

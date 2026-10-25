@@ -30,3 +30,4 @@ class TrainingConfig:
     ssl_loss_weight: float
     perceptive_loss_weight: float
     dropout_schedule: DropoutScheduleConfig
+    checkpoint: str | None = None

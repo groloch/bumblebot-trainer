@@ -15,6 +15,7 @@ from .utils import (
     init_logdir,
     init_run,
     model_parameters,
+    move_optimizer_state,
     wsd_schedule,
     dropout_schedule,
     Trainer
@@ -97,11 +98,16 @@ class SSLTrainer(Trainer):
         total_params, trainable_params = model_parameters(self.model)
         print(f'Model Parameters: {total_params/1e6:.2f}M total, {trainable_params/1e6:.2f}M trainable')
 
-        print('Loading datasets')
-        self._load_datasets()
-
         print('Building optimizer and scheduler')
         self._build_optimizer()
+
+        self.starting_step = 0
+        if self.training_config.checkpoint is not None:
+            print(f'Resuming training from checkpoint {self.training_config.checkpoint}')
+            self._load_ckpt()
+
+        print('Loading datasets')
+        self._load_datasets()
 
         self.logger = MetricLogger(self.tracking_config.use_mlflow)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -212,6 +218,45 @@ class SSLTrainer(Trainer):
         for p in self.teacher.parameters():
             p.requires_grad = False
 
+    def _load_ckpt(self):
+        ckpt_path = self.training_config.checkpoint
+        ckpt_logdir = '/'.join(ckpt_path.split('/')[:-1])
+        self.logdir = ckpt_logdir
+
+        teacher_ckpt = os.path.join(ckpt_logdir, 'teacher.pth')
+        predictor_ckpt = os.path.join(ckpt_logdir, 'predictor.pth')
+
+        muon_ckpt = os.path.join(ckpt_logdir, 'muon_optimizer.pth')
+        adamw_ckpt = os.path.join(ckpt_logdir, 'adamw_optimizer.pth')
+
+        muon_schdlr_ckpt = os.path.join(ckpt_logdir, 'muon_scheduler.pth')
+        adamw_schdlr_ckpt = os.path.join(ckpt_logdir, 'adamw_scheduler.pth')
+
+        self.model.load_state_dict(
+            torch.load(ckpt_path, map_location='cpu', weights_only=True)
+        )
+        self.predictor.load_state_dict(
+            torch.load(predictor_ckpt, map_location='cpu', weights_only=True)
+        )
+        self.teacher.load_state_dict(
+            torch.load(teacher_ckpt, map_location='cpu', weights_only=False)
+        )
+
+        self.muon_optimizer.load_state_dict(
+            torch.load(muon_ckpt, map_location='cpu', weights_only=False)
+        )
+        self.adamw_optimizer.load_state_dict(
+            torch.load(adamw_ckpt, map_location='cpu', weights_only=False)
+        )
+
+        self.muon_scheduler.load_state_dict(
+            torch.load(muon_schdlr_ckpt, map_location='cpu', weights_only=False)
+        )
+        self.adamw_scheduler.load_state_dict(
+            torch.load(adamw_schdlr_ckpt, map_location='cpu', weights_only=False)
+        )
+        self.starting_step = int(ckpt_path.split('.')[0].split('step')[-1])
+
     def _update_dropout(self, perceptive_policy_accuracy: float):
         ds = self.training_config.dropout_schedule
         self._steps_since_dropout_update += 1
@@ -262,12 +307,12 @@ class SSLTrainer(Trainer):
         if self.data_config.streaming:
             dataset = MixedSSLIterableDataset(datasets, weights)
         else:
-            dataset = MixedSSLDataset(datasets, weights) if len(datasets) > 1 else datasets[0]
+            dataset = MixedSSLDataset(datasets, weights, offset=self.starting_step) if len(datasets) > 1 else datasets[0]
 
         self.train_dataloader = DataLoader(
             dataset,
             batch_size=self.training_config.batch_size,
-            shuffle=True,
+            shuffle=False,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth),
@@ -285,6 +330,9 @@ class SSLTrainer(Trainer):
         self.teacher.eval()
         self.teacher.to(self.device)
         # self.teacher.compile(mode='max-autotune')
+
+        move_optimizer_state(self.muon_optimizer, self.device)
+        move_optimizer_state(self.adamw_optimizer, self.device)
 
         print('Loading puzzle and Stockfish evaluation datasets')
         self.evaluator = EvaluationSuite(
@@ -309,9 +357,10 @@ class SSLTrainer(Trainer):
         self._n_dropout_updates = 0
         self._steps_since_dropout_update = 0
 
-        step = 0
         total_steps = self.training_config.max_steps
-        pbar = tqdm(total=total_steps, desc='SSL Training')
+        pbar = tqdm(total=total_steps, initial=self.starting_step, desc='SSL Training')
+
+        step = self.starting_step
 
         acc_buffer = AccumulationBuffer(gradient_accumulation_steps, self.device)
         policy_stats = torch.zeros(2, device=self.device)

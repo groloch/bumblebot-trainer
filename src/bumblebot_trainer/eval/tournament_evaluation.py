@@ -6,6 +6,9 @@ import random
 import time
 from pathlib import Path
 
+import chess
+import chess.pgn
+
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -15,10 +18,10 @@ from ..modeling.utils import load_model_state_dict
 from ..config import TournamentConfig, SSLModelConfig
 from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo_ratings
+from .onnx_policy import Lc0OnnxPolicyModel
 from .stockfish_evaluation import _load_model_from_logdir
 from .tournament_game_worker import play_tournament_worker
 from .utils import (
-    atomic_write_json,
     autocast,
     get_model_embeddings,
     load_run_config,
@@ -53,6 +56,25 @@ def _prepare_models(configured_models, cli_logdirs, root_dir: Path):
     for index, spec in enumerate(specs, start=1):
         if isinstance(spec, str):
             spec = {'logdir': spec}
+        if isinstance(spec, dict) and 'onnx' in spec:
+            checkpoint = resolve_path(spec['onnx'], root_dir)
+            name = str(spec.get('name') or checkpoint.stem)
+            if name in models:
+                raise ValueError(f'Duplicate tournament model name {name!r}')
+            model = Lc0OnnxPolicyModel(
+                checkpoint, input_format=int(spec['input_format']),
+                policy_output=spec.get('policy_output'),
+                runtime=spec.get('runtime', 'onnxruntime'),
+            )
+            models[name] = model
+            encodings[name] = f'lc0_native:{model.input_format}'
+            metadata[name] = {
+                'kind': 'lc0_onnx', 'name': name, 'logdir': str(checkpoint.parent),
+                'checkpoint': str(checkpoint), 'encoding': encodings[name],
+                'providers': model.providers,
+            }
+            print(f'Loaded {index}/{len(specs)}: {name} ({checkpoint})')
+            continue
         if not isinstance(spec, dict) or 'logdir' not in spec:
             raise ValueError(f'Each model must be a logdir string or mapping with logdir: {spec!r}')
 
@@ -99,7 +121,7 @@ def _prepare_models(configured_models, cli_logdirs, root_dir: Path):
         }
         print(f'Loaded {index}/{len(specs)}: {name} ({checkpoint})')
 
-    return models, encodings, metadata, device
+    return models, encodings, metadata, device or torch.device('cpu')
 
 
 def _load_router_for_tournament(
@@ -409,6 +431,10 @@ def _unique_positions(positions, stats=None):
 
 
 def _model_outputs(model, positions, device, *, policy: bool = False, value: bool = False):
+    if isinstance(model, Lc0OnnxPolicyModel):
+        if value:
+            raise ValueError('LC0 ONNX tournament participants require policy or sampled play')
+        return torch.from_numpy(model.predict_positions(positions)).to(device), None
     tokens, extra = stack_positions(positions, device)
     with torch.inference_mode(), autocast(device):
         squares, cls = get_model_embeddings(model, tokens, extra)
@@ -958,70 +984,61 @@ def _leaderboard_preview(names, match_points, game_score):
 
 
 def _write_markdown(path: Path, output: dict):
+    def cell(value):
+        return str(value).replace('|', '&#124;').replace('\n', ' ')
+
     lines = [
-        '# Bumblebot all-against-all tournament',
-        '',
-        f"- Rounds: {output['summary']['rounds']}",
-        f"- Play mode: {output['summary']['play_mode']}",
-        f"- Participants: {len(output['participants'])}",
-        *(
-            [f"- Pinned player: {output['summary']['pin_player']['name']} "
-             f"at {output['summary']['pin_player']['elo']:g} Elo"]
-            if output['summary'].get('pin_player') else []
-        ),
-        '- Each round uses one book position; each matchup is a two-game color-swapped pair.',
-        '',
-        '## Bayesian Elo rankings',
-        '',
-        '| Rank | Participant | Elo | Match points | Games (W-D-L) |',
-        '|---:|---|---:|---:|---:|',
+        '| Rank | Participant | Elo | Match points | Game score | Games | W-D-L |',
+        '|---:|---|---:|---:|---:|---:|---|',
     ]
-    for ranking in output['rankings']:
+    names = [row['name'] for row in output['rankings']]
+    for row in output['rankings']:
         lines.append(
-            f"| {ranking['rank']} | {ranking['name']} | "
-            f"{ranking['elo']:.0f} ± {ranking['elo_std']:.0f} | "
-            f"{ranking['match_points']:g} | "
-            f"{ranking['wins']}-{ranking['draws']}-{ranking['losses']} |"
+            f"| {row['rank']} | {cell(row['name'])} | "
+            f"{row['elo']:.0f} ± {row['elo_std']:.0f} | "
+            f"{row['match_points']:g} | {row['game_score']:g} | {row['games']} | "
+            f"{row['wins']}-{row['draws']}-{row['losses']} |"
         )
-
-    lines.extend(['', '## Games by round', ''])
-    for round_record in output['rounds']:
-        lines.extend([
-            f"### Round {round_record['round']}",
-            '',
-            f"Book position: `{round_record['opening_fen']}`",
-            '',
-        ])
-        for match in round_record['matches']:
-            if 'error' in match:
-                lines.append(
-                    f"- **{match.get('model_a', '?')} vs {match.get('model_b', '?')}:** FAILED"
-                )
-                lines.append('')
-                continue
-            lines.append(
-                f"#### {match['model_a']} vs {match['model_b']} — "
-                f"{match['model_a_score']:.1f}–{match['model_b_score']:.1f} "
-                f"({match['result']})"
-            )
-            lines.append('')
-            for game_number, game in enumerate(match['games'], 1):
-                lines.append(
-                    f"<details><summary>Game {game_number}: {game['white_model']} (White) "
-                    f"vs {game['black_model']} (Black), {game['result']} — "
-                    f"{game['termination']}, {game['plies']} plies</summary>"
-                )
-                lines.extend(['', '```text', game['moves'] or '(no moves)', '```', '</details>', ''])
-
-    lines.extend(['## Participants', ''])
-    for name, metadata in output['participants'].items():
-        if metadata.get('kind') == 'consortium':
-            lines.append(f"- **{name}**: routed consortium using groups {metadata['expert_groups']}.")
-            for group, experts in metadata['experts'].items():
-                lines.append(f"  - {group}: {experts}")
-        else:
-            lines.append(f"- **{name}**: `{metadata['logdir']}` — `{metadata['checkpoint']}`")
+    head_to_head = {(a, b): [0, 0, 0] for a in names for b in names if a != b}
+    for record in output['rounds']:
+        for match in record['matches']:
+            for game in match.get('games', []):
+                for name, opponent in ((game['white_model'], game['black_model']),
+                                       (game['black_model'], game['white_model'])):
+                    score = _game_score_for_model(game, name)
+                    head_to_head[name, opponent][0 if score == 1 else 1 if score == .5 else 2] += 1
+    lines.extend(['', '| Head-to-head (row W-D-L) | ' + ' | '.join(map(cell, names)) + ' |',
+                  '|---|' + '---:|' * len(names)])
+    for name in names:
+        cells = ['—' if name == opponent else '-'.join(map(str, head_to_head[name, opponent]))
+                 for opponent in names]
+        lines.append('| ' + cell(name) + ' | ' + ' | '.join(cells) + ' |')
     path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def _append_match_pgn(path: Path, event: dict):
+    """Append completed games immediately so a long run retains its games."""
+    with path.open('a', encoding='utf-8') as handle:
+        for index, result in enumerate(event.get('games', []), 1):
+            game = chess.pgn.Game()
+            game.setup(chess.Board(event['opening_fen'], chess960=True))
+            game.headers.update({
+                'Event': 'Bumblebot all-against-all tournament',
+                'Round': f"{event['round']}.{event['match_id'] + 1}.{index}",
+                'White': result['white_model'], 'Black': result['black_model'],
+                'Result': result['result'],
+                'Termination': 'unterminated' if result['termination'] == 'max_game_plies' else 'normal',
+                'TerminationReason': result['termination'],
+                'PlyCount': str(result['plies']),
+            })
+            board = game.board()
+            node = game
+            for san in result['moves'].split():
+                move = board.parse_san(san)
+                node = node.add_variation(move)
+                board.push(move)
+            print(game.accept(chess.pgn.StringExporter(headers=True, variations=False, comments=False)),
+                  file=handle, end='\n\n')
 
 
 def run_tournament(
@@ -1087,6 +1104,12 @@ def run_tournament(
     errors = []
     pairings = list(itertools.combinations(entrant_names, 2))
 
+    result_path = resolve_path(config.results_path, root_dir) if config.results_path else root_dir / 'tournament_results.md'
+    markdown_path = result_path.with_suffix('.md')
+    pgn_path = result_path.with_suffix('.pgn')
+    pgn_path.parent.mkdir(parents=True, exist_ok=True)
+    pgn_path.write_text('', encoding='utf-8')
+
     print(
         f'Starting {config.rounds}-round all-against-all tournament: '
         f'{len(entrant_names)} participants, {len(pairings)} paired matchups per round, '
@@ -1137,6 +1160,7 @@ def run_tournament(
                         )
                         # Keep both color-swapped games as independent Elo observations.
                         all_games.extend(event['games'])
+                        _append_match_pgn(pgn_path, event)
                 if 'error' in event:
                     errors.append(event)
                 round_record['matches'].append(event)
@@ -1290,16 +1314,6 @@ def run_tournament(
         'rounds': rounds,
     }
 
-    if config.results_path:
-        result_path = resolve_path(config.results_path, root_dir)
-        if result_path.suffix.lower() not in ('.json', '.md'):
-            result_path = result_path.with_suffix('.json')
-        json_path = result_path.with_suffix('.json')
-        markdown_path = result_path.with_suffix('.md')
-    else:
-        json_path = root_dir / 'tournament_results.json'
-        markdown_path = root_dir / 'tournament_results.md'
-    atomic_write_json(json_path, output)
     _write_markdown(markdown_path, output)
 
     print(f'Tournament Elo rankings ({config.play_mode}, paired all-against-all):')
@@ -1309,10 +1323,10 @@ def run_tournament(
             f"{ranking['elo']:.0f} ± {ranking['elo_std']:.0f} Elo, "
             f"{ranking['match_points']:g} match points"
         )
-    print(f'Results: {json_path} and {markdown_path}')
+    print(f'Results: {markdown_path} and {pgn_path}')
     if errors:
         raise RuntimeError(
-            f'{len(errors)} paired matchup(s) failed; partial results saved to {json_path}. '
+            f'{len(errors)} paired matchup(s) failed; partial results saved to {markdown_path} and {pgn_path}. '
             f"First failure: {errors[0].get('error', 'unknown error')}"
         )
     return output

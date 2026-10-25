@@ -33,7 +33,7 @@ def _encoded_position_key(tokens, extra) -> bytes:
 
 
 def _encode_position(board: chess.Board, encoding: str) -> dict:
-    history = tuple(move.uci() for move in board.move_stack) if encoding == 'lc0' else ()
+    history = tuple(move.uci() for move in board.move_stack) if encoding == 'lc0' or encoding.startswith('lc0_native:') else ()
     cache_key = (encoding, board.fen(en_passant='fen'), history)
     with _POSITION_CACHE_LOCK:
         cached = _POSITION_CACHE.get(cache_key)
@@ -41,7 +41,11 @@ def _encode_position(board: chess.Board, encoding: str) -> dict:
             _POSITION_CACHE.move_to_end(cache_key)
             return cached
 
-        position = encode_position(board, encoding)
+        if encoding.startswith('lc0_native:'):
+            from .onnx_policy import encode_lc0_position
+            position = encode_lc0_position(board, int(encoding.split(':')[1]))
+        else:
+            position = encode_position(board, encoding)
         position['position_key'] = _encoded_position_key(position['tokens'], position['extra'])
         _POSITION_CACHE[cache_key] = position
         if len(_POSITION_CACHE) > _POSITION_CACHE_LIMIT:

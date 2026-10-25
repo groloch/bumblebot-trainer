@@ -69,6 +69,18 @@ def model_parameters(model: torch.nn.Module):
 
     return total_params, trainable_params
 
+
+def move_optimizer_state(optimizer: torch.optim.Optimizer, device: torch.device):
+    """Move optimizer state tensors (e.g. Muon momentum buffers, AdamW exp-avg)
+    to ``device``.
+
+    Required when resuming from a checkpoint.
+    """
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if isinstance(value, torch.Tensor):
+                state[key] = value.to(device)
+
 def build_model_config(config: dict):
     return build_runtime_model_config(config)
 

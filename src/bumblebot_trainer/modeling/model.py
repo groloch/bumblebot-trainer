@@ -22,7 +22,7 @@ class ChessModel(nn.Module):
         )
         self.encoder: Encoder = build_encoder(
             model_config.encoder_name,
-            config=model_config.encoder_config
+            config=model_config.encoder_config,
         )
 
         cls_loss_fn = nn.CrossEntropyLoss(

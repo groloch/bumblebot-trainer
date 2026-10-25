@@ -63,6 +63,9 @@ class MHA(nn.Module):
             num_heads=num_heads
         )
 
+        self.qnorm = nn.LayerNorm(hidden_size)
+        self.knorm = nn.LayerNorm(hidden_size)
+
     def forward(self, x: torch.Tensor, shared_gen: nn.Module, **kwargs) -> torch.Tensor:
         B, N, _ = x.shape
 
@@ -73,6 +76,9 @@ class MHA(nn.Module):
 
         q: torch.Tensor = q + kwargs['pos_embeds']
         k: torch.Tensor = k + kwargs['pos_embeds']
+
+        q = self.qnorm(q)
+        k = self.knorm(k)
 
         q = q.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)
         k = k.reshape(B, N, self.num_heads, self.head_dim).transpose(1, 2)

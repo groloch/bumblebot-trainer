@@ -18,7 +18,7 @@ from ..utils import VariationNode, san_to_uci
 
 class MixedSSLDataset(Dataset):
     """Sample from several map-style SSL datasets according to their configured weights."""
-    def __init__(self, datasets: list[Dataset], weights: list[float]):
+    def __init__(self, datasets: list[Dataset], weights: list[float], offset: int = 0):
         if len(datasets) == 0 or len(datasets) != len(weights):
             raise ValueError('datasets and weights must have the same non-zero length')
         if any(weight <= 0 for weight in weights):
@@ -27,6 +27,7 @@ class MixedSSLDataset(Dataset):
         self.datasets = datasets
         self.weights = np.asarray(weights, dtype=np.float64)
         self.weights /= self.weights.sum()
+        self.offset = 0
 
     def __len__(self):
         return sum(len(dataset) for dataset in self.datasets) * 10
@@ -34,7 +35,7 @@ class MixedSSLDataset(Dataset):
     def __getitem__(self, idx):
         dataset_idx = int(np.random.choice(len(self.datasets), p=self.weights))
         dataset = self.datasets[dataset_idx]
-        sample_idx = idx % len(dataset)
+        sample_idx = (idx + self.offset) % len(dataset)
         return dataset[sample_idx]
 
 
@@ -70,7 +71,7 @@ def sample_ssl_future_indices(game_length: int, max_prediction_depth: int) -> tu
     if max_prediction_depth < 2:
         raise ValueError('max_prediction_depth must be at least two')
 
-    move_idx = np.random.randint(0, game_length - 1)
+    move_idx = np.random.randint(0, (game_length - 1))
     max_lookahead = min(max_prediction_depth, game_length - move_idx)
     max_even_lookahead = max_lookahead - (max_lookahead % 2)
     lookahead = 2 * np.random.randint(1, max_even_lookahead // 2 + 1)
@@ -86,7 +87,7 @@ class LichessStandardGamesSSLDataset(LichessStandardGamesDataset):
 
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth, num_proc=16
-        )
+        ).shuffle()
         self.len = len(self.dataset)
 
         self.max_prediction_depth = max_prediction_depth
@@ -277,7 +278,7 @@ class T91GamesSSLDataset(T91GamesDataset):
         self.dataset = self.dataset.filter(
             lambda x: x['game_length'] > max_prediction_depth,
             num_proc=28
-        )
+        ).shuffle()
         self.len = len(self.dataset)
 
     def __getitem__(self, idx):
@@ -304,8 +305,8 @@ class T91GamesSSLDataset(T91GamesDataset):
 
         nodes = self._get_nodes(board, game, position_idx)
         nodes_ = self._get_nodes(board_, game, target_position_idx)
-        value, qvalue = self._get_wdl_and_q(board.turn, game, position_idx)
-        value_, qvalue_ = self._get_wdl_and_q(board_.turn, game, target_position_idx)
+        value, qvalue = self._get_wdl_and_q(game, board.turn, position_idx)
+        value_, qvalue_ = self._get_wdl_and_q(game, board_.turn, target_position_idx)
 
         return encode_both_boards(
             board=board,

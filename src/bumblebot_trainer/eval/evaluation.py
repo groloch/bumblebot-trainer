@@ -265,15 +265,9 @@ class StockfishEvaluator:
             'kl_sum': 0.0,
             'target_confidence_sum': 0.0,
         })
-        wdl_abs_error_sum = 0.0
-        wdl_cp_loss_sum = 0.0
         qvalue_abs_error_sum = 0.0
         qvalue_cp_loss_sum = 0.0
         qvalue_count = 0
-        value_from_logits = isinstance(
-            getattr(self.model.value_head, 'loss_fn', None),
-            nn.CrossEntropyLoss,
-        )
 
         def accumulate_policy_stats(name, mask, correct, topk_correct, kl, target_confidence):
             count = int(mask.sum().item())
@@ -283,8 +277,8 @@ class StockfishEvaluator:
             group['count'] += count
             group['correct'] += int((correct & mask).sum().item())
             group['topk_correct'] += int((topk_correct & mask).sum().item())
-            group['kl_sum'] += float(kl[mask].sum().item())
-            group['target_confidence_sum'] += float(target_confidence[mask].sum().item())
+            group['kl_sum'] += kl[mask].sum().item()
+            group['target_confidence_sum'] += target_confidence[mask].sum().item()
 
         pbar = tqdm(self.dataloader, desc='Evaluating Stockfish positions', leave=False)
         for tokens, targets, extra in pbar:
@@ -297,9 +291,7 @@ class StockfishEvaluator:
                 policy_logits = self.model.policy_head(squares, None).logits
                 value_output = self.model.value_head(value_embedding, None).logits
 
-            policy_targets = targets['policy'].float()
-            policy_targets = policy_targets.clamp_min(0.0)
-            policy_targets = policy_targets / policy_targets.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            policy_targets = targets['policy']
 
             target_moves = policy_targets.argmax(dim=-1)
             predictions = policy_logits.argmax(dim=-1)
@@ -308,13 +300,13 @@ class StockfishEvaluator:
             topk_correct = (
                 policy_logits.topk(k, dim=-1).indices == target_moves[:, None]
             ).any(dim=-1)
-            log_probabilities = F.log_softmax(policy_logits.float(), dim=-1)
+            log_probabilities = F.log_softmax(policy_logits, dim=-1)
             kl = F.kl_div(
                 log_probabilities,
                 policy_targets,
                 reduction='none',
             ).sum(dim=-1)
-            target_confidence = policy_targets.max(dim=-1).values
+            target_confidence = predictions[policy_targets]
 
             accumulate_policy_stats(
                 'all',
@@ -336,22 +328,11 @@ class StockfishEvaluator:
                     target_confidence,
                 )
 
-            predicted_wdl_result = wdl_to_expected_result(
-                value_output,
-                from_logits=value_from_logits,
-            ).reshape(-1)
-            # q = w - l is derived from the same WDL distribution (q == 2*(w + 0.5*d) - 1
-            # over the softmax), replacing the removed qvalue head.
-            predicted_qvalue = (2.0 * predicted_wdl_result - 1.0).clamp(-1.0, 1.0)
-            target_qvalue = 2.0 * targets['qvalue'].float().reshape(-1) - 1.0
+            value_probs = value_output.softmax(dim=-1)
+            predicted_qvalue = (value_probs[..., 0] - value_probs[..., -1]).view(-1)
+            target_qvalue = 2.0 * targets['qvalue'].view(-1) - 1.0
             stockfish_cp = targets['stockfish_cp'].float().reshape(-1)
-
-            wdl_cp = expected_result_to_cp(predicted_wdl_result)
             qvalue_cp = expected_result_to_cp((predicted_qvalue + 1.0) / 2.0)
-            wdl_abs_error_sum += float(
-                (predicted_wdl_result - targets['qvalue'].float().reshape(-1)).abs().sum().item()
-            )
-            wdl_cp_loss_sum += float((wdl_cp - stockfish_cp).abs().sum().item())
             qvalue_abs_error_sum += float(
                 (predicted_qvalue - target_qvalue).abs().sum().item()
             )
@@ -362,7 +343,6 @@ class StockfishEvaluator:
         for name, group in stats.items():
             count = group['count']
             prefix = f'stockfish/policy/{name}' if name != 'all' else 'stockfish/policy'
-            metrics[f'{prefix}/positions'] = float(count)
             metrics[f'{prefix}/accuracy'] = _mean_or_zero(group['correct'], count)
             metrics[f'{prefix}/top{self.TOP_K}_accuracy'] = _mean_or_zero(
                 group['topk_correct'], count
@@ -372,12 +352,6 @@ class StockfishEvaluator:
                 group['target_confidence_sum'], count
             )
 
-        metrics['stockfish/wdl/expected_result_mae'] = _mean_or_zero(
-            wdl_abs_error_sum, qvalue_count
-        )
-        metrics['stockfish/wdl/centipawn_loss'] = _mean_or_zero(
-            wdl_cp_loss_sum, qvalue_count
-        )
         metrics['stockfish/qvalue/expected_result_mae'] = _mean_or_zero(
             qvalue_abs_error_sum, qvalue_count
         )

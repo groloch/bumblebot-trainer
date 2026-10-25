@@ -42,27 +42,29 @@ class WdlDataset:
             for move, percentage in zip(legal_moves, policy)
         ]
 
-    def _get_nearest_value(self, values, position_idx: int) -> float:
-        """Some of the positions in the dataset do not have value targets, so we
-        get the closest existing value in the game.
-        Since missing value targets are rare and sparse, this workaround is a good
-        approximation of the actual value of the position.
+    def _get_nearest_pair(self, values_a, values_b, position_idx: int) -> tuple[float, float]:
+        """Get nearest q, d values from a game where there may be missing q or d values.
+        This is a very rare occurence but still needs to be adressed.
         """
-        for distance in range(len(values)):
+        for distance in range(len(values_a)):
             for candidate_idx in (position_idx - distance, position_idx + distance):
-                if 0 <= candidate_idx < len(values):
-                    value = values[candidate_idx]
-                    if value is not None and np.isfinite(value):
-                        return float(value)
-        return 0.5
+                if 0 <= candidate_idx < len(values_a) and candidate_idx < len(values_b):
+                    value_a = values_a[candidate_idx]
+                    value_b = values_b[candidate_idx]
+                    if (value_a is not None and value_b is not None
+                            and np.isfinite(value_a) and np.isfinite(value_b)):
+                        return float(value_a), float(value_b)
+        return 0.5, 0.5
 
-    def _get_wdl_and_q(self, turn: chess.Color, game, position_idx: int) -> torch.Tensor:
-        """Convert expected result and draw chances to side-to-move WDL targets."""
-        value = self._get_nearest_value(game['qvalues'], position_idx)
-        dvalue = self._get_nearest_value(game['dvalues'], position_idx)
+    def _get_wdl_and_q(self, game, turn, position_idx: int) -> torch.Tensor:
+        """Convert lc0's expected score and draw probability to side-to-move WDL targets.
+        """
+        value, dvalue = self._get_nearest_pair(
+            game['qvalues'], game['dvalues'], position_idx
+        )
 
         if turn == chess.BLACK:
-            value = 1-value
+            value = -value
 
         win = (1+value-dvalue)/2.0
         loss = (1-value-dvalue)/2.0

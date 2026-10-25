@@ -17,7 +17,7 @@ class PolicyHead(nn.Module):
     """Chessformer policy head from
     https://arxiv.org/pdf/2605.19091
     """
-    def __init__(self, hidden_size: int, loss_fn: nn.Module):
+    def __init__(self, hidden_size: int, loss_fn: nn.Modul):
         super().__init__()
         self.hidden_size = hidden_size
         self.scale = hidden_size ** -0.5
@@ -28,6 +28,8 @@ class PolicyHead(nn.Module):
         self.pk_proj = nn.Linear(hidden_size, 4)
 
         self.loss_fn = loss_fn
+
+        self.t_proj = nn.Linear(hidden_size, 1)
 
     def forward(
             self,
@@ -62,6 +64,8 @@ class PolicyHead(nn.Module):
             promotion_logits.reshape(B, -1)
         ], dim=-1)
 
+        logits = logits / self.t_proj(squares_embeddings.mean(dim=1, keepdim=False))
+
         if target is not None:
             loss = self.loss_fn(logits, target)
         else:
@@ -76,9 +80,9 @@ class ValueHead(nn.Module):
     def __init__(self, hidden_size: int, loss_fn: nn.Module, output_dim: int = 3):
         super().__init__()
         self.value_proj = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, 128),
             nn.SiLU(),
-            nn.Linear(hidden_size, output_dim)
+            nn.Linear(128, output_dim)
         )
         self.value_proj[2].is_value_final = True # init helper
 

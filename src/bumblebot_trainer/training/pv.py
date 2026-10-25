@@ -30,7 +30,7 @@ from ..tracking.metrics import (
     accuracy_stats,
     topk_accuracy_stats,
 )
-from .utils import init_logdir, init_run, model_parameters, wsd_schedule, Trainer
+from .utils import init_logdir, init_run, model_parameters, wsd_schedule, move_optimizer_state, Trainer
 
 
 class PVTrainer(Trainer):
@@ -200,6 +200,9 @@ class PVTrainer(Trainer):
     def run(self):
         self.model.train()
         self.model.to(self.device)
+
+        move_optimizer_state(self.muon_optimizer, self.device)
+        move_optimizer_state(self.adamw_optimizer, self.device)
 
         print('Loading puzzle evaluation dataset')
         self.evaluator = PuzzleEvaluator(

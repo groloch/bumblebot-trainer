@@ -6,6 +6,8 @@ config/*.yaml
 !config/classification_config.yaml
 !config/consortium_stockfish_evaluation.yaml
 !config/tournament_config.yaml
+!config/lc0_tournament.yaml
+external/lc0/
 tb/
 _*.py
 !__init__.py

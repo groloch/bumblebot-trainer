@@ -202,7 +202,7 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             for position_idx, move in enumerate(moves[:position_count]):
                 if position_idx >= self.min_moves:
                     policy = np.asarray(game['policies'][position_idx])
-                    value, _ = self._get_wdl_and_q(current_board.turn, game, position_idx)
+                    value, _ = self._get_wdl_and_q(game, current_board.turn, position_idx)
                     if self._match_tags(current_board, policy, value):
                         valid_positions.append(position_idx)
                 current_board.push_uci(move)
@@ -215,7 +215,7 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
             board.push_uci(move)
 
         nodes = self._get_nodes(board, game, position_idx)
-        wdl, q = self._get_wdl_and_q(board, game, position_idx)
+        wdl, q = self._get_wdl_and_q(game, board.turn, position_idx)
         sample = process_item(
             board,
             nodes,
@@ -257,7 +257,7 @@ class LichessPuzzlesDataset(PositionDataset):
 
         selected_themes = self.TAGS | {''}
 
-        self.dataset = self.dataset.select(selected).map(
+        self.dataset = self.dataset.select(selected).shuffle().map(
             lambda x: {
                 'fen': x['FEN'],
                 'moves': x['Moves'].split(' '),
