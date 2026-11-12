@@ -8,26 +8,27 @@ from ...utils import ChessConstants
 
 
 class FFN(nn.Module):
-    """Simple MLP FFN layer. Does not contain a gated activation since
-    https://arxiv.org/abs/2409.12272 did not find it to improve performances.
+    """SwiGLU FFN layer: down(silu(gate(x)) * up(x)), as in
+    https://arxiv.org/abs/2002.05202
     """
     def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
 
-        self.linear1 = nn.Linear(hidden_size, intermediate_size)
-        self.linear2 = nn.Linear(intermediate_size, hidden_size)
-        self.linear2.is_residual_tail = True
+        self.gate = nn.Linear(hidden_size, intermediate_size)
+        self.up = nn.Linear(hidden_size, intermediate_size)
+        self.down = nn.Linear(intermediate_size, hidden_size)
+
+        self.down.is_residual_tail = True
 
         self.norm = nn.LayerNorm(hidden_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         _x = self.norm(x)
 
-        _x = self.linear1(_x)
-        _x = F.silu(_x)
-        _x = self.linear2(_x)
+        _x = F.silu(self.gate(_x)) * self.up(_x)
+        _x = self.down(_x)
 
         return x + _x
 

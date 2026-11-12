@@ -1,5 +1,8 @@
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from .utils import HeadOutput
 
@@ -8,8 +11,9 @@ class PolicyOutput(HeadOutput):
     pass
 
 
+@dataclass
 class ValueOutput(HeadOutput):
-    pass
+    qvalue_loss: torch.Tensor = None
 
 
 
@@ -75,10 +79,18 @@ class PolicyHead(nn.Module):
 
 
 class ValueHead(nn.Module):
-    """Simple MLP value head for chess position evaluation in expected win chance.
+    """Attention-pooled value head for chess position evaluation in expected win chance.
+    The encoder square embeddings are used directly as keys and values (no projection);
+    a single query (projection of the mean embedding, whose bias acts as a learned
+    query) scores the squares, and the attention-weighted sum is read out by an MLP.
     """
     def __init__(self, hidden_size: int, loss_fn: nn.Module, output_dim: int = 3):
         super().__init__()
+        self.hidden_size = hidden_size
+        self.scale = hidden_size ** -0.5
+
+        self.vq_proj = nn.Linear(hidden_size, hidden_size)
+
         self.value_proj = nn.Sequential(
             nn.Linear(hidden_size, 128),
             nn.SiLU(),
@@ -88,14 +100,29 @@ class ValueHead(nn.Module):
 
         self.loss_fn = loss_fn
 
-    def forward(self, cls_embedding: torch.Tensor, target: torch.Tensor = None) -> ValueOutput:
-        value = self.value_proj(cls_embedding)
+    def forward(
+            self,
+            squares_embeddings: torch.Tensor,
+            target: torch.Tensor = None,
+            qvalue_target: torch.Tensor = None,
+            ) -> ValueOutput:
+        # squares_embeddings: (B, 64, D); raw encoder embeddings are k and v directly
+        q = self.vq_proj(squares_embeddings.mean(dim=1)) # B D; the bias is the learned query
+        q = q.view(-1, 1, 1, self.hidden_size) # B 1 1 D: single query token
+        kv = squares_embeddings.unsqueeze(1) # B 1 64 D
+        pooled = F.scaled_dot_product_attention(q, kv, kv, scale=self.scale) # B 1 1 D
+        pooled = pooled.reshape(-1, self.hidden_size) # B D
 
-        if target is not None:
-            loss = self.loss_fn(value, target)
+        value = self.value_proj(pooled)
+
+        if target is not None or qvalue_target is not None:
+            losses = self.loss_fn(value, target, qvalue_target)
+            loss = losses.get('value')
+            qvalue_loss = losses.get('qvalue')
         else:
             loss = None
-        return ValueOutput(logits=value, loss=loss)
+            qvalue_loss = None
+        return ValueOutput(logits=value, loss=loss, qvalue_loss=qvalue_loss)
 
 
 class SquareHead(nn.Module):

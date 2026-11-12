@@ -32,7 +32,7 @@ from ..data import (
     MixedSSLIterableDataset,
     SSLCollator
 )
-from ..eval import EvaluationSuite
+from ..eval import PuzzleEvaluator
 from ..tracking import AccumulationBuffer, MetricLogger
 from ..tracking.metrics import (
     accuracy_from_stats,
@@ -146,7 +146,9 @@ class SSLTrainer(Trainer):
 
         lr_schedule_fn = wsd_schedule(
             warmup_steps=self.training_config.warmup_steps,
-            max_steps=self.training_config.max_steps
+            max_steps=self.training_config.max_steps,
+            frac=self.training_config.frac,
+            min_ratio=self.training_config.min_ratio,
         )
         self.muon_scheduler = LambdaLR(self.muon_optimizer, lr_schedule_fn)
         self.adamw_scheduler = LambdaLR(self.adamw_optimizer, lr_schedule_fn)
@@ -298,6 +300,13 @@ class SSLTrainer(Trainer):
             if name == 'lichess' and self.data_config.streaming:
                 dataset_kwargs['min_elo'] = self.data_config.min_elo
 
+            if name == 't91' and self.data_config.streaming:
+                dataset_kwargs.update(
+                    shuffle_buffer_size=self.data_config.shuffle_buffer_size,
+                    seed=self.training_config.seed,
+                    num_workers=self.training_config.num_workers,
+                )
+
             datasets.append(dataset_class(**dataset_kwargs))
             weights.append(weight)
 
@@ -315,6 +324,7 @@ class SSLTrainer(Trainer):
             shuffle=False,
             num_workers=self.training_config.num_workers,
             pin_memory=True,
+            prefetch_factor=1 if self.training_config.num_workers > 0 else None,
             collate_fn=SSLCollator(self.data_config.max_prediction_depth),
         )
 
@@ -334,8 +344,8 @@ class SSLTrainer(Trainer):
         move_optimizer_state(self.muon_optimizer, self.device)
         move_optimizer_state(self.adamw_optimizer, self.device)
 
-        print('Loading puzzle and Stockfish evaluation datasets')
-        self.evaluator = EvaluationSuite(
+        print('Loading puzzle evaluation dataset')
+        self.evaluator = PuzzleEvaluator(
             model=self.model,
             config=self.eval_config,
             encoding=self.data_config.encoding,
@@ -397,11 +407,12 @@ class SSLTrainer(Trainer):
 
             policy_weight = self.training_config.policy_loss_weight
             value_weight = self.training_config.value_loss_weight
+            qvalue_weight = self.training_config.qvalue_loss_weight
             ssl_weight = self.training_config.ssl_loss_weight
             perceptive_weight = self.training_config.perceptive_loss_weight
 
             compute_student_losses = any(
-                w > 0 for w in (policy_weight, value_weight)
+                w > 0 for w in (policy_weight, value_weight, qvalue_weight)
             )
             compute_perceptive_losses = compute_student_losses and perceptive_weight > 0
 
@@ -411,11 +422,13 @@ class SSLTrainer(Trainer):
                     with torch.no_grad():
                         future_embed, target_embed = self.teacher.module.embed(tokens_, **extra_)
                         future_policy_logits = self.teacher.module.policy_head(future_embed).logits
-                        future_value = self.teacher.module.value_head(future_embed.mean(dim=1)).logits
+                        future_value = self.teacher.module.value_head(future_embed).logits
                         if compute_perceptive_losses:
+                            future_value_probs = F.softmax(future_value.float(), dim=-1)
                             perceptive_target = {
                                 'policy': F.softmax(future_policy_logits.float(), dim=-1),
-                                'value': F.softmax(future_value.float(), dim=-1),
+                                'value': future_value_probs,
+                                'qvalue': future_value_probs[..., 0] - future_value_probs[..., -1],
                             }
                         else:
                             perceptive_target = {
@@ -450,10 +463,12 @@ class SSLTrainer(Trainer):
                     perceptive_policy_loss = perceptive_losses['policy']
                     perceptive_policy_logits = perceptive_logits['policy']
                     perceptive_value_loss = perceptive_losses['value']
+                    perceptive_qvalue_loss = perceptive_losses['qvalue']
                 else:
                     ssl_loss = student_embed.sum() * 0.0
                     perceptive_policy_loss = student_embed.sum() * 0.0
                     perceptive_value_loss = student_embed.sum() * 0.0
+                    perceptive_qvalue_loss = student_embed.sum() * 0.0
                     perceptive_policy_logits = logits['policy'].new_empty(
                         (0, logits['policy'].shape[-1])
                     )
@@ -463,6 +478,7 @@ class SSLTrainer(Trainer):
 
                 policy_loss = losses['policy']
                 value_loss = losses['value']
+                qvalue_loss = losses['qvalue']
 
                 total_loss = ssl_loss / gradient_accumulation_steps * ssl_weight
 
@@ -470,6 +486,8 @@ class SSLTrainer(Trainer):
                     total_loss += policy_loss / gradient_accumulation_steps * policy_weight
                 if value_weight:
                     total_loss += value_loss / gradient_accumulation_steps * value_weight
+                if qvalue_weight:
+                    total_loss += qvalue_loss / gradient_accumulation_steps * qvalue_weight
 
                 if perceptive_weight:
                     perceptive_scale = perceptive_weight / gradient_accumulation_steps
@@ -477,6 +495,8 @@ class SSLTrainer(Trainer):
                         total_loss += perceptive_policy_loss * perceptive_scale * policy_weight
                     if value_weight:
                         total_loss += perceptive_value_loss * perceptive_scale * value_weight
+                    if qvalue_weight:
+                        total_loss += perceptive_qvalue_loss * perceptive_scale * qvalue_weight
 
             total_loss.backward()
 
@@ -505,6 +525,12 @@ class SSLTrainer(Trainer):
                 value_loss.detach() * self.training_config.value_loss_weight,
                 partial_step
             )
+            acc_buffer.update('qvalue_loss_unscaled', qvalue_loss.detach(), partial_step)
+            acc_buffer.update(
+                'qvalue_loss',
+                qvalue_loss.detach() * self.training_config.qvalue_loss_weight,
+                partial_step
+            )
 
             acc_buffer.update(
                 'perceptive_policy_loss_unscaled', perceptive_policy_loss.detach(),
@@ -526,6 +552,15 @@ class SSLTrainer(Trainer):
 
             acc_buffer.update(
                 'perceptive_value_loss_unscaled', perceptive_value_loss.detach(),
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_qvalue_loss_unscaled', perceptive_qvalue_loss.detach(),
+                partial_step
+            )
+            acc_buffer.update(
+                'perceptive_qvalue_loss', perceptive_qvalue_loss.detach() * \
+                    self.training_config.qvalue_loss_weight * self.training_config.perceptive_loss_weight,
                 partial_step
             )
             acc_buffer.update(
@@ -561,6 +596,8 @@ class SSLTrainer(Trainer):
 
                 self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
                 self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
+                self.logger.update('qvalue_loss_unscaled', acc_buffer.get_mean('qvalue_loss_unscaled'))
+                self.logger.update('qvalue_loss', acc_buffer.get_mean('qvalue_loss'))
 
                 self.logger.update(
                     'perceptive_policy_loss_unscaled',
@@ -582,6 +619,14 @@ class SSLTrainer(Trainer):
                     acc_buffer.get_mean('perceptive_value_loss_unscaled')
                 )
                 self.logger.update('perceptive_value_loss', acc_buffer.get_mean('perceptive_value_loss'))
+                self.logger.update(
+                    'perceptive_qvalue_loss_unscaled',
+                    acc_buffer.get_mean('perceptive_qvalue_loss_unscaled')
+                )
+                self.logger.update(
+                    'perceptive_qvalue_loss',
+                    acc_buffer.get_mean('perceptive_qvalue_loss')
+                )
                 # \ tracking
 
                 acc_buffer.reset()
@@ -596,19 +641,12 @@ class SSLTrainer(Trainer):
                 step += 1
 
                 if step % self.eval_config.every == 0:
-                    eval_metrics = self.evaluator.run(step)
-                    puzzle_metrics = eval_metrics['puzzle']
-                    stockfish_metrics = eval_metrics['stockfish']
+                    puzzle_metrics = self.evaluator.run(step)
                     pbar.write(
                         f'[step {step}] puzzle Elo: {puzzle_metrics["puzzle/elo"]:.0f} '
                         f'± {puzzle_metrics["puzzle/elo_std"]:.0f} | '
                         f'solved: {puzzle_metrics["puzzle/solved_rate"]:.2%} | '
-                        f'move accuracy: {puzzle_metrics["puzzle/move_accuracy"]:.2%} | '
-                        f'Stockfish policy accuracy: '
-                        f'{stockfish_metrics["stockfish/policy/accuracy"]:.2%} | '
-                        f'top-3: {stockfish_metrics["stockfish/policy/top3_accuracy"]:.2%} | '
-                        f'WDL MAE: '
-                        f'{stockfish_metrics["stockfish/wdl/expected_result_mae"]:.3f}'
+                        f'move accuracy: {puzzle_metrics["puzzle/move_accuracy"]:.2%}'
                     )
 
                 if step >= self.training_config.max_steps:

@@ -16,6 +16,8 @@ class TrainingConfig:
     batch_size: int
     learning_rate: float
     warmup_steps: int
+    frac: float
+    min_ratio: float
     weight_decay: float
     max_grad_norm: float
     seed: int
@@ -27,6 +29,7 @@ class TrainingConfig:
     name: str
     policy_loss_weight: float
     value_loss_weight: float
+    qvalue_loss_weight: float
     ssl_loss_weight: float
     perceptive_loss_weight: float
     dropout_schedule: DropoutScheduleConfig

@@ -9,6 +9,7 @@ from .embedding import Embedding
 from .encoders import build_encoder, EncoderOutput
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from .init import init_weights
+from .loss import ValueLoss
 from ..config.modeling_configs import PredictorConfig, SSLModelConfig
 from ..utils import ChessConstants
 from ..data.ssl.utils import SSLConstants
@@ -17,8 +18,8 @@ from ..data.ssl.utils import SSLConstants
 class SSLChessModel(nn.Module):
     """Chess model for JEPA-like training with modulable training objectives.
     This model predicts the policy (move distribution) and the WDL value.
-    Policy is a lc0-style attention policy head. The value head is an MLP classifier over
-    the global (mean) embedding.
+    Policy is a lc0-style attention policy head. The value head is an attention pooling
+    over the square embeddings (raw embeddings as keys/values) followed by an MLP readout.
     """
     def __init__(self, config: SSLModelConfig, label_smoothing=0.2):
         super().__init__()
@@ -41,7 +42,7 @@ class SSLChessModel(nn.Module):
         )
         self.value_head = ValueHead(
             hidden_size=config.hidden_size,
-            loss_fn=nn.CrossEntropyLoss()
+            loss_fn=ValueLoss()
         )
         init_weights(self, n_layers=config.encoder_config.num_layers)
 
@@ -88,7 +89,8 @@ class SSLChessModel(nn.Module):
         value_embeddings = x if value_indices is None else torch.index_select(x, 0, value_indices)
 
         policy_targets = target['policy']
-        value_targets = target['value']
+        value_targets = target.get('value')
+        qvalue_targets = target.get('qvalue')
 
         head_scope = contextlib.nullcontext() if compute_losses else torch.no_grad()
         with head_scope:
@@ -101,12 +103,16 @@ class SSLChessModel(nn.Module):
                 policy_loss = policy_embeddings.sum() * 0.0
 
             value_out: ValueOutput = self.value_head(
-                value_embeddings.mean(dim=1),
-                value_targets if value_targets.shape[0] > 0 else None,
+                value_embeddings,
+                value_targets if value_targets is not None and value_targets.shape[0] > 0 else None,
+                qvalue_targets if qvalue_targets is not None and qvalue_targets.shape[0] > 0 else None,
             )
             value_loss = value_out.loss
-            if value_targets.shape[0] == 0:
+            qvalue_loss = value_out.qvalue_loss
+            if value_loss is None:
                 value_loss = value_embeddings.sum() * 0.0
+            if qvalue_loss is None:
+                qvalue_loss = value_embeddings.sum() * 0.0
 
         logits = {
             'policy': policy_logits,
@@ -115,6 +121,7 @@ class SSLChessModel(nn.Module):
         losses = {
             'policy': policy_loss,
             'value': value_loss,
+            'qvalue': qvalue_loss,
         }
         return logits, losses
 

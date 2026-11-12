@@ -9,3 +9,8 @@ class SSLDataConfig:
     dataset_mix: dict[str, float]
     streaming: bool
     min_elo: int
+    shuffle_buffer_size: int = 128
+
+    def __post_init__(self):
+        if self.shuffle_buffer_size < 1:
+            raise ValueError("shuffle_buffer_size must be positive")

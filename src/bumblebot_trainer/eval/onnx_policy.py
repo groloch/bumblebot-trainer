@@ -200,8 +200,49 @@ class OnnxPolicyModel:
 
 
 @lru_cache(maxsize=2)
+def _lc0_bindings():
+    """Find installed bindings or this checkout's locally built LC0 extension.
+
+    Spawned game workers import modules afresh, so loading must work without
+    requiring the caller to add LC0's build directory to PYTHONPATH.
+    """
+    import importlib
+    import importlib.machinery
+    import importlib.util
+    import sys
+
+    try:
+        return importlib.import_module('backends')
+    except ModuleNotFoundError as exc:
+        if exc.name != 'backends':
+            raise
+
+    build_dir = Path(__file__).resolve().parents[3] / 'external' / 'lc0' / 'build'
+    for suffix in importlib.machinery.EXTENSION_SUFFIXES:
+        extension = build_dir / f'backends{suffix}'
+        if not extension.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location('backends', extension)
+        try:
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except ImportError as exc:
+            raise ImportError(
+                f'Cannot load LC0 bindings from {extension}. Rebuild LC0 with '
+                '-Dpython_bindings=true using the active Python environment.'
+            ) from exc
+        sys.modules['backends'] = module
+        return module
+    raise ImportError(
+        f'LC0 Python bindings were not found in the active environment or {build_dir}. '
+        'Build external/lc0/source with -Dpython_bindings=true using the active '
+        'Python environment; the extension must match its Python version.'
+    )
+
+
+@lru_cache(maxsize=2)
 def _lc0_encoder(input_format):
-    import backends
+    backends = _lc0_bindings()
     return backends.Backend(backend='random', options=f'input_mode={input_format}')
 
 
@@ -214,11 +255,11 @@ def encode_lc0_position(board, input_format: int) -> dict:
     the upstream binding exposes the encoder's transform.
     """
     import chess
-    import backends
     from ..utils import get_move_id
 
     if input_format not in (1, 2):
         raise ValueError(f'Unsupported LC0 input format {input_format}; expected 1 or 2')
+    backends = _lc0_bindings()
     encoder = _lc0_encoder(input_format)
     root = board.root()
     state = backends.GameState(root.fen(), [m.uci() for m in board.move_stack], board.chess960)
@@ -249,6 +290,8 @@ class Lc0OnnxPolicyModel(OnnxPolicyModel):
     def __init__(self, checkpoint_path, *, input_format: int, policy_output=None, runtime='onnxruntime'):
         if input_format not in (1, 2):
             raise ValueError('LC0 adapter currently supports input formats 1 and 2')
+        # Fail before any games or report files are started if encoding is unavailable.
+        _lc0_encoder(input_format)
         self.input_format = input_format
         super().__init__(checkpoint_path, 112, policy_output=policy_output or '/output/policy')
         metadata = self.input_metadata[self.tokens_input]

@@ -1,15 +1,33 @@
+import ctypes
+import gc
+
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
 import chess
 import numpy as np
+import pyarrow as pa
+import pyarrow.dataset as arrow_dataset
 
 from .utils import (
     process_item,
     VariationNode,
     san_to_uci,
     get_lichess_files_for_year,
+    T91_REPO_ID,
     WdlDataset
 )
+
+
+# Arrow's pool and libc can both retain freed Parquet decode/read buffers.
+# malloc_trim is available on this training host (glibc); other platforms still
+# benefit from releasing Arrow's pool and collecting unreachable file objects.
+try:
+    _malloc_trim = getattr(ctypes.CDLL(None), 'malloc_trim', None)
+except OSError:
+    _malloc_trim = None
+if _malloc_trim is not None:
+    _malloc_trim.argtypes = (ctypes.c_size_t,)
+    _malloc_trim.restype = ctypes.c_int
 
 
 class IterablePositionDataset(IterableDataset):
@@ -19,6 +37,18 @@ class IterablePositionDataset(IterableDataset):
 
     def __iter__(self):
         raise NotImplementedError()
+
+    def _iter_items(self):
+        for index, item in enumerate(self.dataset):
+            # Parquet decoding can leave large freed allocations in Arrow's pool.
+            # Return them to the OS regularly: each DataLoader worker has its own
+            # pool, and eight retained high-water marks can exhaust system RAM.
+            if index % 256 == 0:
+                gc.collect()
+                pa.default_memory_pool().release_unused()
+                if _malloc_trim is not None:
+                    _malloc_trim(0)
+            yield item
 
 
 class LichessStandardIterableDataset(IterablePositionDataset):
@@ -34,19 +64,28 @@ class LichessStandardIterableDataset(IterablePositionDataset):
         self.min_moves = min_moves
         self.min_elo = min_elo
 
-        data_files = get_lichess_files_for_year(2025)
-        data_files += get_lichess_files_for_year(2024)
-        data_files += get_lichess_files_for_year(2023)
+        # Cap the total before HF resolves files or reads Parquet metadata.
+        data_files = []
+        for year in (2025, 2024, 2023):
+            remaining = 100 - len(data_files)
+            if remaining <= 0:
+                break
+            data_files.extend(get_lichess_files_for_year(year, limit=remaining))
 
         self.dataset = load_dataset(
             'Lichess/standard-chess-games',
             split='train',
             data_files=data_files,
-            streaming=True
+            columns=['WhiteElo', 'BlackElo', 'movetext'],
+            streaming=True,
+            batch_size=32,
+            # Avoid retaining compressed data from previously scanned row groups.
+            fragment_scan_options=arrow_dataset.ParquetFragmentScanOptions(pre_buffer=False),
         )
+        print(f'Lichess streaming: {len(data_files)} files, {self.dataset.num_shards} shards')
 
     def __iter__(self):
-        for item in self.dataset:
+        for item in self._iter_items():
             if item['WhiteElo'] < self.min_elo or item['BlackElo'] < self.min_elo:
                 continue
 
@@ -72,8 +111,8 @@ class LichessStandardIterableDataset(IterablePositionDataset):
 
 
 class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
-    """groloch/lc0_training_T91_10m is a dataset of 10m games played Leela Chess Zero
-     against itself during its extended RL runs.
+    """groloch/lc0_selfplay_games is a dataset of games played Leela Chess Zero
+     against itself during its extended RL runs (test91).
 
     This dataset is licensed under the odbl licence
     """
@@ -81,32 +120,40 @@ class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
             self,
             min_moves: int,
             encoding: str,
-            shuffle_buffer_size: int = 10_000,
-            seed: int = 0
+            shuffle_buffer_size: int = 128,
+            seed: int = 0,
+            num_workers: int = 0
         ):
         super().__init__(encoding)
         WdlDataset.__init__(self)
 
         self.min_moves = min_moves
 
-        # self.dataset = load_dataset(
-        #     'groloch/lc0_training_T91_10m',
-        #     split='train',
-        #     streaming=True
-        # )
-
         self.dataset = load_dataset(
-            'parquet',
-            data_files='/home/baptiste/data/ai/datasets/lc0_training/tmp/*.parquet',
+            T91_REPO_ID,
+            columns=['fen', 'movelist', 'policies', 'qvalues', 'dvalues'],
             split='train',
-            streaming=True
+            streaming=True,
+            batch_size=32,
+            # Avoid retaining compressed data from previously scanned row groups.
+            fragment_scan_options=arrow_dataset.ParquetFragmentScanOptions(pre_buffer=False),
         )
 
-        self.dataset = self.dataset.shuffle(seed=seed, buffer_size=shuffle_buffer_size)
+        # Only inspect row-group metadata when file shards cannot fill the workers.
+        # Do this before shuffle so HF can assign disjoint shards to each worker.
+        if self.dataset.num_shards < num_workers:
+            self.dataset = self.dataset.reshard()
+        self.dataset = self.dataset.shuffle(
+            seed=seed, buffer_size=shuffle_buffer_size, max_buffer_input_shards=1,
+        )
+        print(f'T91 streaming: {self.dataset.num_shards} shards, '
+              f'{num_workers} workers, shuffle buffer {shuffle_buffer_size} games/worker')
 
     def __iter__(self):
         while True:
-            for item in self.dataset:
+            saw_item = False
+            for item in self._iter_items():
+                saw_item = True
                 moves = item['movelist'].split()
                 game_length = len(moves) - self.min_moves
 
@@ -127,8 +174,7 @@ class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
                     raise ValueError('T91 policy length does not match the number of legal moves')
 
                 nodes = self._get_nodes(board, item, move_idx)
-                value = self._get_wdl(board, item, move_idx)
-                qvalue = self._get_qvalue(board.turn, item, move_idx)
+                value, qvalue = self._get_wdl_and_q(item, board.turn, move_idx)
                 yield process_item(
                     board,
                     nodes,
@@ -137,3 +183,7 @@ class T91GamesIterableDataset(IterablePositionDataset, WdlDataset):
                     value=value,
                     qvalue=qvalue,
                 )
+
+            # HF assigns no shards to excess workers; let those workers stop.
+            if not saw_item:
+                return

@@ -275,3 +275,18 @@ def play_tournament_worker(
                     'opening_fen': spec['opening_fen'],
                     'error': error,
                 })
+
+
+def tournament_worker_loop(task_queue, play_mode, max_game_plies, model_encodings,
+                           routed_encodings, consortium_names, request_queue,
+                           response_channels, result_queue):
+    """Retain process-local encoders and position caches across all rounds."""
+    while (task := task_queue.get()) is not None:
+        match_specs, response_slots = task
+        response_queues = {game_id: response_channels[slot]
+                           for game_id, slot in response_slots.items()}
+        play_tournament_worker(
+            match_specs, play_mode, max_game_plies, model_encodings,
+            routed_encodings, consortium_names, request_queue,
+            response_queues, result_queue,
+        )

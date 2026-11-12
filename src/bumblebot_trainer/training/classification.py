@@ -103,6 +103,8 @@ class ClassificationTrainer(Trainer):
             wsd_schedule(
                 warmup_steps=self.training_config['warmup_steps'],
                 max_steps=self.training_config['max_steps'],
+                frac=self.training_config.get('frac', 0.9),
+                min_ratio=self.training_config.get('min_ratio', 0.1),
             ),
         )
 

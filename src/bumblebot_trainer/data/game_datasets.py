@@ -13,6 +13,7 @@ from .utils import (
     encode_board,
     get_move_id,
     get_game_phase,
+    T91_REPO_ID,
     WdlDataset
 )
 
@@ -131,13 +132,8 @@ class T91GamesDataset(GamePositionDataset, WdlDataset):
         if self.tag not in self.TAGS:
             raise ValueError(f'Unknown position tag {tag}; expected one of {self.TAGS}')
 
-        # self.dataset = load_dataset(
-        #     'groloch/lc0_training_T91_10m',
-        #     split='train',
-        # )
         self.dataset = load_dataset(
-            'parquet',
-            data_files='/home/baptiste/data/ai/datasets/lc0_training/tmp/*.parquet',
+            T91_REPO_ID,
             split='train',
         )
 

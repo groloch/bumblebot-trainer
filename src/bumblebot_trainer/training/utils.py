@@ -84,20 +84,20 @@ def move_optimizer_state(optimizer: torch.optim.Optimizer, device: torch.device)
 def build_model_config(config: dict):
     return build_runtime_model_config(config)
 
-def wsd_schedule(warmup_steps: int, max_steps: int):
+def wsd_schedule(warmup_steps: int, max_steps: int, frac: float = 0.7, min_ratio: float = 0.1):
     """Warmup-stable-decay learning rate schedule.
-    Learning rate is warmed up for a set number of steps, then it stays constant
-    until 90% of the training is done, and it decays to 10% of the original
-    lr over the last 10% of the training.
+    Learning rate is warmed up linearly for ``warmup_steps`` steps, then it stays
+    constant until ``frac`` of the training is done, and it cosine-decays to
+    ``min_ratio`` of the original lr over the last ``1 - frac`` of the training.
     """
     def schedule_lr(current_step: int):
         if current_step < warmup_steps:
             return float(current_step) / float(max(1, warmup_steps))
-        decay_start = max_steps * 0.9
+        decay_start = max_steps * frac
         if current_step < decay_start:
             return 1.0
-        progress = (current_step - decay_start) / (max_steps - decay_start)
-        return 0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * progress))
+        progress = (current_step - decay_start) / max(1.0, max_steps - decay_start)
+        return min_ratio + (1.0 - min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
     return schedule_lr
 
 def dropout_schedule(min_dropout: float, max_dropout: float, convergence_rate: float):

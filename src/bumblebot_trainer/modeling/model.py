@@ -6,6 +6,7 @@ from .encoders import Encoder, EncoderOutput, build_encoder
 from .heads import PolicyHead, PolicyOutput, ValueHead, ValueOutput
 from .embedding import Embedding
 from .init import init_weights
+from .loss import ValueLoss
 from ..config.modeling_configs import ModelConfig
 
 
@@ -28,7 +29,7 @@ class ChessModel(nn.Module):
         cls_loss_fn = nn.CrossEntropyLoss(
             ignore_index=-100
         )
-        reg_loss_fn = nn.CrossEntropyLoss()
+        reg_loss_fn = ValueLoss()
 
         self.policy_head = PolicyHead(model_config.hidden_size, cls_loss_fn)
         self.value_head = ValueHead(model_config.hidden_size, reg_loss_fn)
@@ -46,7 +47,7 @@ class ChessModel(nn.Module):
             target_dict.get('policy', None)
         )
         value_out: ValueOutput = self.value_head(
-            x.cls_embedding,
+            x.squares_embeddings,
             target_dict.get('value', None)
         )
 

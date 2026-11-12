@@ -10,12 +10,19 @@ class SSLConstants:
 
 def collate_supervision_targets(targets):
     """Collate the policy and value labels together with their source-row indices.
+
+    value and qvalue share a single validity mask so that both targets stay
+    row-aligned with the value head inputs (valid_value_indices).
     """
     output = {}
 
-    for name in ('policy', 'value', 'qvalue'):
-        mask_name = f'{name}_mask'
-        valid = [bool(target.get(mask_name, True)) for target in targets]
+    policy_valid = [bool(target.get('policy_mask', True)) for target in targets]
+    value_valid = [
+        bool(target.get('value_mask', True)) and bool(target.get('qvalue_mask', True))
+        for target in targets
+    ]
+
+    for name, valid in (('policy', policy_valid), ('value', value_valid), ('qvalue', value_valid)):
         indices = torch.tensor(
             [i for i, is_valid in enumerate(valid) if is_valid],
             dtype=torch.long,
@@ -29,7 +36,8 @@ def collate_supervision_targets(targets):
             output[name] = targets[0][name].new_empty(
                 (0, *targets[0][name].shape)
             )
-        output[f'valid_{name}_indices'] = indices
+        if name != 'qvalue':
+            output[f'valid_{name}_indices'] = indices
 
     return output
 
@@ -95,14 +103,15 @@ class SSLCollator:
 
         keys = extra[0].keys()
         extra = {key: torch.stack([item[key] for item in extra]) for key in keys}
+        future_extra = extra_
         extra_ = {}
         for key in keys:
-            selected_values = [extra_[i][key] for i in selected_ssl_indices]
+            selected_values = [future_extra[i][key] for i in selected_ssl_indices]
             if selected_values:
                 extra_[key] = torch.stack(selected_values)
             else:
-                extra_[key] = extra_[0][key].new_empty(
-                    (0, *extra_[0][key].shape)
+                extra_[key] = future_extra[0][key].new_empty(
+                    (0, *future_extra[0][key].shape)
                 )
 
         return tokens, tokens_, targets, moves, moves_attention_mask, extra, extra_

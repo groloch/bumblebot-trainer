@@ -287,9 +287,9 @@ class StockfishEvaluator:
             extra = {k: v.to(self.device, non_blocking=True) for k, v in extra.items()}
 
             with autocast(self.device):
-                squares, value_embedding = get_model_embeddings(self.model, tokens, extra)
+                squares, _ = get_model_embeddings(self.model, tokens, extra)
                 policy_logits = self.model.policy_head(squares, None).logits
-                value_output = self.model.value_head(value_embedding, None).logits
+                value_output = self.model.value_head(squares, None).logits
 
             policy_targets = targets['policy']
 

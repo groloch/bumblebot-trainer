@@ -17,9 +17,17 @@ from ..config import (
 )
 from ..data import (
     CombinedPositionDataset,
+    LichessEvalDataset,
     LichessPuzzlesDataset,
+    LichessStandardGamesDataset,
+    MixedSSLDataset,
+    MixedSSLIterableDataset,
     PositionCollator,
     T91GamesDataset,
+)
+from ..data.iterable_datasets import (
+    LichessStandardIterableDataset,
+    T91GamesIterableDataset,
 )
 from ..eval import PuzzleEvaluator
 from ..modeling import SSLChessModel
@@ -108,6 +116,10 @@ class PVTrainer(Trainer):
             self.model.encoder.layer_dropout = False
 
     def _load_datasets(self):
+        if 'dataset_mix' in self.data_config:
+            self._load_mixed_datasets()
+            return
+
         tag = self.data_config.get('tag', 'all').lower()
         t91_dataset = T91GamesDataset(
             min_moves=self.data_config['min_moves'],
@@ -129,6 +141,71 @@ class PVTrainer(Trainer):
             shuffle=True,
             num_workers=self.training_config['num_workers'],
             pin_memory=True,
+            collate_fn=PositionCollator(),
+        )
+
+    def _load_mixed_datasets(self):
+        """Build the training dataset from an SSL-style dataset_mix, so a pv run can
+        consume the same data configuration (and the same streamed T91 data) as an
+        ssl run."""
+        dataset_classes = {
+            't91': (T91GamesDataset, T91GamesIterableDataset),
+            'lichess': (LichessStandardGamesDataset, LichessStandardIterableDataset),
+            'puzzles': (LichessPuzzlesDataset, None),
+            'lichess_eval': (LichessEvalDataset, None),
+        }
+        streaming = bool(self.data_config.get('streaming', False))
+        dataset_idx = 1 if streaming else 0
+
+        datasets = []
+        weights = []
+        for name, weight in self.data_config['dataset_mix'].items():
+            if weight <= 0:
+                continue
+            if name not in dataset_classes:
+                raise ValueError(
+                    f'Unknown PV dataset {name}; expected one of {tuple(dataset_classes)}'
+                )
+            dataset_class = dataset_classes[name][dataset_idx]
+            if dataset_class is None:
+                raise ValueError(f'PV dataset {name} does not support streaming')
+
+            dataset_kwargs = {'encoding': self.data_config['encoding']}
+            if name in ('t91', 'lichess'):
+                dataset_kwargs['min_moves'] = self.data_config['min_moves']
+            if name == 't91' and not streaming:
+                dataset_kwargs['tag'] = self.data_config.get('tag', 'all')
+            if name == 'lichess' and streaming:
+                dataset_kwargs['min_elo'] = self.data_config.get('min_elo', 0)
+            if name == 't91' and streaming:
+                dataset_kwargs.update(
+                    shuffle_buffer_size=self.data_config.get('shuffle_buffer_size', 128),
+                    seed=self.training_config['seed'],
+                    num_workers=self.training_config['num_workers'],
+                )
+            if name in ('puzzles', 'lichess_eval'):
+                dataset_kwargs['split'] = 'train'
+
+            datasets.append(dataset_class(**dataset_kwargs))
+            weights.append(weight)
+
+        if not datasets:
+            raise ValueError('dataset_mix must contain at least one dataset with positive weight')
+
+        if len(datasets) > 1:
+            dataset = MixedSSLIterableDataset(datasets, weights) if streaming \
+                else MixedSSLDataset(datasets, weights)
+        else:
+            dataset = datasets[0]
+
+        num_workers = self.training_config['num_workers']
+        self.train_dataloader = DataLoader(
+            dataset,
+            batch_size=self.training_config['batch_size'],
+            shuffle=not streaming,
+            num_workers=num_workers,
+            pin_memory=True,
+            prefetch_factor=1 if streaming and num_workers > 0 else None,
             collate_fn=PositionCollator(),
         )
 
@@ -164,6 +241,8 @@ class PVTrainer(Trainer):
         schedule = wsd_schedule(
             warmup_steps=self.training_config['warmup_steps'],
             max_steps=self.training_config['max_steps'],
+            frac=self.training_config.get('frac', 0.9),
+            min_ratio=self.training_config.get('min_ratio', 0.1),
         )
         self.muon_scheduler = LambdaLR(self.muon_optimizer, schedule)
         self.adamw_scheduler = LambdaLR(self.adamw_optimizer, schedule)
@@ -236,9 +315,11 @@ class PVTrainer(Trainer):
                 _, logits, losses = self.model(tokens, target=targets, **extra)
                 policy_loss = losses['policy']
                 value_loss = losses['value']
+                qvalue_loss = losses['qvalue']
                 total_loss = (
                     policy_loss * self.training_config['policy_loss_weight']
                     + value_loss * self.training_config['value_loss_weight']
+                    + qvalue_loss * self.training_config['qvalue_loss_weight']
                 ) / gradient_accumulation_steps
 
             total_loss.backward()
@@ -253,6 +334,12 @@ class PVTrainer(Trainer):
             acc_buffer.update(
                 'value_loss',
                 value_loss.detach() * self.training_config['value_loss_weight'],
+                partial_step,
+            )
+            acc_buffer.update('qvalue_loss_unscaled', qvalue_loss.detach(), partial_step)
+            acc_buffer.update(
+                'qvalue_loss',
+                qvalue_loss.detach() * self.training_config['qvalue_loss_weight'],
                 partial_step,
             )
             policy_stats += accuracy_stats(logits['policy'].detach(), targets['policy'])
@@ -274,6 +361,8 @@ class PVTrainer(Trainer):
             self.logger.update('policy_top3_accuracy', accuracy_from_stats(policy_top3_stats).item())
             self.logger.update('value_loss_unscaled', acc_buffer.get_mean('value_loss_unscaled'))
             self.logger.update('value_loss', acc_buffer.get_mean('value_loss'))
+            self.logger.update('qvalue_loss_unscaled', acc_buffer.get_mean('qvalue_loss_unscaled'))
+            self.logger.update('qvalue_loss', acc_buffer.get_mean('qvalue_loss'))
 
             acc_buffer.reset()
             policy_stats.zero_()

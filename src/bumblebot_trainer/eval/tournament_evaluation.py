@@ -20,7 +20,7 @@ from ..utils import build_model_config, load_config_file
 from .bayes_elo import bayes_elo_ratings
 from .onnx_policy import Lc0OnnxPolicyModel
 from .stockfish_evaluation import _load_model_from_logdir
-from .tournament_game_worker import play_tournament_worker
+from .tournament_game_worker import tournament_worker_loop
 from .utils import (
     autocast,
     get_model_embeddings,
@@ -437,12 +437,12 @@ def _model_outputs(model, positions, device, *, policy: bool = False, value: boo
         return torch.from_numpy(model.predict_positions(positions)).to(device), None
     tokens, extra = stack_positions(positions, device)
     with torch.inference_mode(), autocast(device):
-        squares, cls = get_model_embeddings(model, tokens, extra)
+        squares, _ = get_model_embeddings(model, tokens, extra)
         policy_logits = model.policy_head(squares, None).logits if policy else None
         values = None
         if value:
             # SSL and PV value outputs regress the side-to-move expected result.
-            values = model.value_head(cls, None).logits.float().mean(dim=-1)
+            values = model.value_head(squares, None).logits.float().mean(dim=-1)
     return policy_logits, values
 
 
@@ -1115,7 +1115,23 @@ def run_tournament(
         f'{len(entrant_names)} participants, {len(pairings)} paired matchups per round, '
         f'{config.play_mode} play'
     )
+    worker_processes = []
+    worker_tasks = []
+    response_channels = [context.Queue() for _ in range(
+        2 * min(config.max_active_matches, len(pairings)))]
     try:
+        for index in range(min(config.num_workers, config.max_active_matches, len(pairings))):
+            tasks = context.Queue()
+            worker_tasks.append(tasks)
+            process = context.Process(
+                target=tournament_worker_loop,
+                args=(tasks, config.play_mode, config.max_game_plies, encodings,
+                      routed_encodings, consortium_names, request_queue,
+                      response_channels, result_queue),
+                name=f'tournament-game-worker-{index}',
+            )
+            process.start()
+            worker_processes.append(process)
         for round_number in range(1, config.rounds + 1):
             opening_fen = rng.choice(openings)
             round_record = {
@@ -1172,67 +1188,29 @@ def run_tournament(
             try:
                 for offset in range(0, len(match_specs), config.max_active_matches):
                     wave = match_specs[offset:offset + config.max_active_matches]
-                    response_queues = {
-                        game_id: context.Queue()
-                        for spec in wave
-                        for game_id in (spec['match_id'] * 2, spec['match_id'] * 2 + 1)
+                    response_slots = {
+                        spec['match_id'] * 2 + color: index * 2 + color
+                        for index, spec in enumerate(wave) for color in (0, 1)
                     }
-                    worker_count = min(config.num_workers, len(wave))
-                    worker_shards = [wave[index::worker_count] for index in range(worker_count)]
+                    response_queues = {game_id: response_channels[slot]
+                                       for game_id, slot in response_slots.items()}
+                    worker_count = min(len(worker_processes), len(wave))
                     processes = {}
-                    worker_processes = []
-                    try:
-                        for worker_index, shard in enumerate(worker_shards):
-                            worker_response_queues = {
-                                game_id: response_queues[game_id]
-                                for spec in shard
-                                for game_id in (spec['match_id'] * 2, spec['match_id'] * 2 + 1)
-                            }
-                            process = context.Process(
-                                target=play_tournament_worker,
-                                args=(
-                                    shard,
-                                    config.play_mode,
-                                    config.max_game_plies,
-                                    encodings,
-                                    routed_encodings,
-                                    consortium_names,
-                                    request_queue,
-                                    worker_response_queues,
-                                    result_queue,
-                                ),
-                                name=f'tournament-game-worker-{worker_index}',
-                            )
-                            process.start()
-                            worker_processes.append(process)
-                            for spec in shard:
-                                processes[spec['match_id']] = process
+                    for worker_index in range(worker_count):
+                        shard = wave[worker_index::worker_count]
+                        slots = {spec['match_id'] * 2 + color:
+                                 response_slots[spec['match_id'] * 2 + color]
+                                 for spec in shard for color in (0, 1)}
+                        worker_tasks[worker_index].put((shard, slots))
+                        for spec in shard:
+                            processes[spec['match_id']] = worker_processes[worker_index]
 
-                        _run_inference_worker(
-                            models,
-                            encodings,
-                            consortia,
-                            device,
-                            config,
-                            request_queue,
-                            response_queues,
-                            processes,
-                            result_queue,
-                            [spec['match_id'] for spec in wave],
-                            on_match_result,
-                            inference_rng,
-                            inference_cache,
-                            inference_stats,
-                        )
-                    finally:
-                        for process in worker_processes:
-                            process.join(timeout=5.0)
-                            if process.is_alive():
-                                process.terminate()
-                                process.join()
-                        for channel in response_queues.values():
-                            channel.close()
-                            channel.join_thread()
+                    _run_inference_worker(
+                        models, encodings, consortia, device, config,
+                        request_queue, response_queues, processes, result_queue,
+                        [spec['match_id'] for spec in wave], on_match_result,
+                        inference_rng, inference_cache, inference_stats,
+                    )
             finally:
                 progress.close()
 
@@ -1241,7 +1219,14 @@ def run_tournament(
             round_record['matches'].sort(key=lambda match: match.get('match_id', -1))
 
     finally:
-        for channel in (request_queue, result_queue):
+        for tasks in worker_tasks:
+            tasks.put(None)
+        for process in worker_processes:
+            process.join(timeout=5.0)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+        for channel in (*worker_tasks, *response_channels, request_queue, result_queue):
             channel.close()
             channel.join_thread()
 

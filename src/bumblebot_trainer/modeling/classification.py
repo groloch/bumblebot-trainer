@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from .heads import ValueHead
+from .loss import ValueLoss
 
 
 class PositionClassificationHeads(nn.Module):
@@ -14,12 +15,12 @@ class PositionClassificationHeads(nn.Module):
         super().__init__()
         self.activity_head = ValueHead(
             64*hidden_size,
-            loss_fn=nn.CrossEntropyLoss(),
+            loss_fn=ValueLoss(),
             output_dim=2,
         )
         self.evaluation_head = ValueHead(
             64*hidden_size,
-            loss_fn=nn.CrossEntropyLoss(),
+            loss_fn=ValueLoss(),
             output_dim=3,
         )
 

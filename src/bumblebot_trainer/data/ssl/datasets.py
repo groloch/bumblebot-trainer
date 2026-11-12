@@ -130,7 +130,7 @@ class LichessStandardIterableSSLDataset(LichessStandardIterableDataset):
         self.max_prediction_depth = max_prediction_depth
 
     def __iter__(self):
-        for item in self.dataset:
+        for item in self._iter_items():
             if item['WhiteElo'] < self.min_elo or item['BlackElo'] < self.min_elo:
                 continue
 
@@ -332,10 +332,11 @@ class T91GamesIterableSSLDataset(T91GamesIterableDataset):
             min_moves: int,
             max_prediction_depth: int,
             encoding: str,
-            shuffle_buffer_size: int = 10_000,
-            seed: int = 0
+            shuffle_buffer_size: int = 128,
+            seed: int = 0,
+            num_workers: int = 0
         ):
-        super().__init__(min_moves, encoding, shuffle_buffer_size, seed)
+        super().__init__(min_moves, encoding, shuffle_buffer_size, seed, num_workers)
         self.max_prediction_depth = max_prediction_depth
 
     def _policy_nodes(self, board, policy):
@@ -347,7 +348,9 @@ class T91GamesIterableSSLDataset(T91GamesIterableDataset):
 
     def __iter__(self):
         while True:
-            for item in self.dataset:
+            saw_item = False
+            for item in self._iter_items():
+                saw_item = True
                 moves = item['movelist'].split()
                 available_positions = len(moves) - self.min_moves
 
@@ -370,10 +373,8 @@ class T91GamesIterableSSLDataset(T91GamesIterableDataset):
                 for move in moves[position_idx:target_position_idx]:
                     board_.push_uci(move)
 
-                value = self._get_wdl(board.turn, item, position_idx)
-                value_ = self._get_wdl(board_.turn, item, target_position_idx)
-                qvalue = self._get_qvalue(board.turn, item, position_idx)
-                qvalue_ = self._get_qvalue(board_.turn, item, target_position_idx)
+                value, qvalue = self._get_wdl_and_q(item, board.turn, position_idx)
+                value_, qvalue_ = self._get_wdl_and_q(item, board_.turn, target_position_idx)
 
                 yield encode_both_boards(
                     board=board,
@@ -389,3 +390,7 @@ class T91GamesIterableSSLDataset(T91GamesIterableDataset):
                     qvalue=qvalue,
                     qvalue_=qvalue_,
                 )
+
+            # An empty worker shard must terminate instead of spinning forever.
+            if not saw_item:
+                return

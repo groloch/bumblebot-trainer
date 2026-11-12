@@ -10,6 +10,10 @@ from ..utils import eval_to_playerwinpercent, get_move_id, ChessConstants
 
 from typing import Literal, Optional
 
+# Hugging Face dataset repo with the lc0 T91 self-play games (parquet shards
+# under data/, train split; columns: fen, movelist, policies, qvalues, dvalues).
+T91_REPO_ID = 'groloch/lc0_selfplay_games'
+
 
 @dataclass
 class VariationNode:
@@ -411,7 +415,7 @@ def parse_result(result_str: Literal['1-0', '1/2-1/2', '0-1']) -> int:
         case _:
             raise ValueError(f'Unable to parse chess game result {result_str}')
 
-def get_lichess_files_for_year(year: int) -> list[str]:
+def get_lichess_files_for_year(year: int, limit: int | None = None) -> list[str]:
     """Utility function to fetch yearly data from lichess' standard chess games dataset
     """
     files = list_repo_tree(
@@ -420,6 +424,10 @@ def get_lichess_files_for_year(year: int) -> list[str]:
         path_in_repo=f'data/year={year}',
         recursive=True,
     )
-    return sorted(
-        f.path for f in files if f.path.endswith('.parquet')
-    )
+    paths = []
+    for file in files:
+        if file.path.endswith('.parquet'):
+            paths.append(file.path)
+            if limit is not None and len(paths) >= limit:
+                break
+    return sorted(paths)
